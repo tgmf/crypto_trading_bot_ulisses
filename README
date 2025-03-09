@@ -37,7 +37,7 @@ This project implements a sophisticated cryptocurrency trading system using Baye
 - Docker (optional)
 - WSL (if on Windows)
 
-### Environment Setup
+### Local Environment Setup
 
 ```bash
 # Create conda environment
@@ -46,3 +46,131 @@ conda activate trading_env
 
 # Install dependencies
 pip install -r requirements.txt
+```
+
+### Docker and Conda Together
+
+This project uses both conda and Docker for different aspects of the development workflow:
+
+#### Development Environment (Conda)
+- Provides your Python environment with required packages
+- Used for active development, testing, and quick iterations
+- Faster for day-to-day development without container rebuilds
+
+```bash
+# For active development
+conda activate trading_env
+```
+
+#### Reproducible Environment (Docker)
+- Provides a complete, isolated environment (OS, Python, dependencies)
+- Ensures consistent behavior across different machines
+- Ideal for deployment and sharing with others
+
+```bash
+# Build Docker container (run from WSL bash, not within conda)
+docker-compose build
+
+# Start services defined in docker-compose.yml
+docker-compose up
+```
+
+**Typical Workflow:** Develop initially in conda for speed, then periodically test in Docker to ensure everything works in a clean, reproducible environment.
+```
+
+## Usage
+
+### Using Shell Script
+
+The project includes a convenience script for common operations:
+
+```bash
+# Show available commands
+./launch.sh help
+
+# Collect historical data from exchanges
+./launch.sh collect
+
+# Train models on collected data
+./launch.sh train
+
+# Run backtests on trained models
+./launch.sh backtest
+
+# Launch Jupyter notebook for analysis
+./launch.sh notebook
+```
+
+### Direct Python Usage
+
+```bash
+# Activate environment first
+conda activate trading_env
+
+# Data Collection
+python src/main.py --mode collect
+
+# Model Training
+python src/main.py --mode train
+
+# Backtesting
+python src/main.py --mode backtest
+```
+
+## Implementation Approach
+
+This project follows a step-by-step development approach:
+
+1. **Phase 1: Setup and Data Collection**
+   - Development environment configuration
+   - Data collection infrastructure
+   - Feature engineering framework
+
+2. **Phase 2: Model Development and Initial Testing**
+   - Basic Bayesian model implementation
+   - Initial backtesting framework
+   - Simple strategy implementation
+
+3. **Phase 3: Advanced Model Development**
+   - Quantum-inspired model implementation
+   - Feature importance analysis
+   - Hyperparameter optimization
+
+4. **Phase 4: Advanced Strategy and Risk Management**
+   - Dynamic position sizing
+   - Enhanced risk management
+   - Market regime detection
+
+5. **Phase 5: Production Deployment and Monitoring**
+   - Exchange integration
+   - Monitoring dashboard
+   - Performance tracking
+
+## Key Features
+
+### Bayesian Modeling
+
+The initial model uses Bayesian ordered logistic regression to generate probabilistic trade signals with explicit uncertainty quantification.
+
+### Quantum-Inspired Three-State Framework
+
+The advanced model treats trading decisions as a quantum-inspired three-state system:
+- Short (-1)
+- No position (0)
+- Long (1)
+
+Instead of forced classification, it outputs probabilities for each state, enabling sophisticated hedging strategies when uncertainty is high.
+
+### Fee-Aware Training
+
+All models are trained with explicit incorporation of trading fees, ensuring that signals only trigger when the expected profit exceeds transaction costs plus a minimum profit threshold.
+
+## Testing Strategy
+
+- Begin with paper trading
+- Implement risk controls from the start
+- Always account for fees in your metrics
+
+## License
+
+MIT License
