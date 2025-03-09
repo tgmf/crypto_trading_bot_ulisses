@@ -1,0 +1,48 @@
+# Cryptocurrency Trading Bot
+
+A machine learning powered cryptocurrency trading bot focused on quantum-inspired probabilistic decision making.
+
+## Overview
+
+This project implements a sophisticated cryptocurrency trading system using Bayesian and quantum-inspired models to make probabilistic trading decisions. The system is designed with a focus on:
+
+- Fee-aware model training and evaluation
+- Probabilistic three-state decision making (long, short, no trade)
+- Geometric market analysis
+- Comprehensive risk management
+- Realistic backtesting
+
+## Project Structure
+
+- **data/** - Raw and processed market data
+  - **raw/** - Original data from exchanges
+  - **processed/** - Feature-engineered data
+  - **backtest_results/** - Backtest outputs and metrics
+- **src/** - Source code
+  - **data/** - Data collection and management
+  - **features/** - Feature engineering
+  - **models/** - Trading models and algorithms
+  - **backtesting/** - Backtesting framework
+  - **visualization/** - Visualization tools
+- **notebooks/** - Jupyter notebooks for exploration and analysis
+- **config/** - Configuration files
+- **models/** - Saved model artifacts
+- **logs/** - Application logs
+
+## Setup and Installation
+
+### Prerequisites
+
+- Python 3.8+
+- Docker (optional)
+- WSL (if on Windows)
+
+### Environment Setup
+
+```bash
+# Create conda environment
+conda create -n trading_env python=3.10 -y
+conda activate trading_env
+
+# Install dependencies
+pip install -r requirements.txt

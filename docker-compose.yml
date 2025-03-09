@@ -1,0 +1,12 @@
+version: '3'
+
+services:
+  trading_bot:
+    build: .
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    ports:
+      - "8888:8888"  # For Jupyter
+    command: jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser --allow-root

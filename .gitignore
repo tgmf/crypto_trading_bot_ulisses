@@ -41,3 +41,13 @@ var/
 # Logs
 logs/
 *.log
+
+# Conda environment
+Miniconda3-latest-Linux-x86_64.sh
+
+# Backup files
+*.tar.gz.bak
+
+# VS Code
+.vscode/
+*.code-workspace

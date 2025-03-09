@@ -1,0 +1,32 @@
+# Base Configuration
+
+environment: development  # development, testing, production
+
+# Data Collection Settings
+data:
+  timeframes:
+    - 1m
+    - 5m
+    - 15m
+    - 1h
+    - 4h
+  symbols:
+    - BTC/USD
+    - ETH/USD
+  start_date: 2020-01-01
+  exchanges:
+    - binance
+    - ftx
+
+# Backtesting Settings
+backtesting:
+  fee_rate: 0.0006  # 0.06% per side
+  min_profit_target: 0.008  # 0.8%
+  slippage: 0.0001  # 0.01% slippage model
+
+# Model Settings
+model:
+  type: bayesian  # bayesian, quantum, ensemble
+  validation_method: walk_forward  # walk_forward, purged_kfold
+  walk_forward_window: 60  # days
+  walk_forward_step: 7  # days

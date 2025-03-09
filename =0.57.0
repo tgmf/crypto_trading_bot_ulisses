@@ -1,0 +1,12 @@
+Requirement already satisfied: numba in /home/tg/miniconda3/envs/trading_env/lib/python3.10/site-packages (0.56.4)
+Requirement already satisfied: llvmlite<0.40,>=0.39.0dev0 in /home/tg/miniconda3/envs/trading_env/lib/python3.10/site-packages (from numba) (0.39.1)
+Collecting numpy<1.24,>=1.18 (from numba)
+  Using cached numpy-1.23.5-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (2.3 kB)
+Requirement already satisfied: setuptools in /home/tg/miniconda3/envs/trading_env/lib/python3.10/site-packages (from numba) (75.8.0)
+Using cached numpy-1.23.5-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (17.1 MB)
+Installing collected packages: numpy
+  Attempting uninstall: numpy
+    Found existing installation: numpy 2.2.3
+    Uninstalling numpy-2.2.3:
+      Successfully uninstalled numpy-2.2.3
+Successfully installed numpy-1.23.5
