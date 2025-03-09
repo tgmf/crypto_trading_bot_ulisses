@@ -1,0 +1,43 @@
+# Data files
+data/raw/
+data/processed/
+data/backtest_results/
+
+# API keys and secrets
+*.env
+.env.*
+config/*_keys.yaml
+
+# Model artifacts
+models/*.pkl
+models/*.h5
+models/*.joblib
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Logs
+logs/
+*.log
