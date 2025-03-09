@@ -23,7 +23,7 @@ class TestDataCollector:
         return {
             'data': {
                 'exchanges': ['binance'],
-                'symbols': ['BTC/USD'],
+                'symbols': ['BTC/USDT'],
                 'timeframes': ['1h'],
                 'start_date': '2023-01-01'
             }

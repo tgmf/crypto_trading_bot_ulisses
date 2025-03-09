@@ -45,11 +45,12 @@ class ConfigLoader:
         if 'ENVIRONMENT' in os.environ:
             self.config['environment'] = os.environ['ENVIRONMENT']
         
-        # Exchange API Keys (for authenticated requests)
+        # Initialize exchanges config if not present
+        if 'exchanges' not in self.config:
+            self.config['exchanges'] = {}
+        
+        # Binance API Keys
         if 'BINANCE_API_KEY' in os.environ and 'BINANCE_API_SECRET' in os.environ:
-            if 'exchanges' not in self.config:
-                self.config['exchanges'] = {}
-            
             self.config['exchanges']['binance'] = {
                 'api_key': os.environ['BINANCE_API_KEY'],
                 'api_secret': os.environ['BINANCE_API_SECRET']
@@ -59,6 +60,28 @@ class ConfigLoader:
                 self.config['exchanges']['binance']['testnet'] = (
                     os.environ['BINANCE_TESTNET'].lower() == 'true'
                 )
+        
+        # Kraken API Keys
+        if 'KRAKEN_API_KEY' in os.environ and 'KRAKEN_API_SECRET' in os.environ:
+            self.config['exchanges']['kraken'] = {
+                'api_key': os.environ['KRAKEN_API_KEY'],
+                'api_secret': os.environ['KRAKEN_API_SECRET']
+            }
+        
+        # KuCoin API Keys
+        if all(k in os.environ for k in ['KUCOIN_API_KEY', 'KUCOIN_API_SECRET', 'KUCOIN_PASSPHRASE']):
+            self.config['exchanges']['kucoin'] = {
+                'api_key': os.environ['KUCOIN_API_KEY'],
+                'api_secret': os.environ['KUCOIN_API_SECRET'],
+                'passphrase': os.environ['KUCOIN_PASSPHRASE']
+            }
+            
+            if 'KUCOIN_TESTNET' in os.environ:
+                self.config['exchanges']['kucoin']['testnet'] = (
+                    os.environ['KUCOIN_TESTNET'].lower() == 'true'
+                )
+        
+        # FTX API Keys - Removed as FTX is no longer operational
         
         # Backtesting parameters
         if 'BACKTEST_FEE_RATE' in os.environ:

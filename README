@@ -8,7 +8,6 @@ This project implements a sophisticated cryptocurrency trading system using Baye
 
 - Fee-aware model training and evaluation
 - Probabilistic three-state decision making (long, short, no trade)
-- Geometric market analysis
 - Comprehensive risk management
 - Realistic backtesting
 

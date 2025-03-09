@@ -23,7 +23,7 @@ class BacktestEngine:
         self.logger = logging.getLogger(__name__)
         self.fee_rate = self.config.get('backtesting', {}).get('fee_rate', 0.0006)
         
-    def run_backtest(self, exchange='binance', symbol='BTC/USD', timeframe='1h'):
+    def run_backtest(self, exchange='binance', symbol='BTC/USDT', timeframe='1h'):
         """Run backtest for a given model and dataset"""
         self.logger.info(f"Running backtest for {exchange} {symbol} {timeframe}")
         

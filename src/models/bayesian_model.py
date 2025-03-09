@@ -73,23 +73,26 @@ class BayesianModel:
     
     def build_model(self, X_train, y_train):
         """Build Bayesian model for three-state classification"""
-        unique_classes = np.unique(y_train)
+        # Adjust y_train to be 0, 1, 2 instead of -1, 0, 1
+        y_train_adj = y_train + 1
+        
+        unique_classes = np.unique(y_train_adj)
         n_classes = len(unique_classes)
         
         with pm.Model() as model:
             # Priors for unknown model parameters
+            # For ordered logistic, we need n_classes-1 cutpoints
             alpha = pm.Normal("alpha", mu=0, sigma=10, shape=n_classes-1)
-            betas = pm.Normal("betas", mu=0, sigma=2, shape=(X_train.shape[1], n_classes-1))
             
-            # Expected values of latent variables
+            # Coefficients for each feature
+            betas = pm.Normal("betas", mu=0, sigma=2, shape=X_train.shape[1])
+            
+            # Expected values of latent variable
             eta = pm.math.dot(X_train, betas)
             
-            # Add intercepts
-            for i in range(n_classes-1):
-                eta = eta + alpha[i]
-            
             # Ordered logistic regression
-            p = pm.OrderedLogistic("p", eta=eta, cutpoints=alpha, observed=y_train+1)
+            # NOTE: No need to add alpha to eta, as cutpoints handles that
+            p = pm.OrderedLogistic("p", eta=eta, cutpoints=alpha, observed=y_train_adj)
             
             # Sample from the posterior
             trace = pm.sample(1000, tune=1000, chains=2, cores=1, return_inferencedata=True)
@@ -98,7 +101,7 @@ class BayesianModel:
         self.trace = trace
         return model, trace
     
-    def train(self, exchange='binance', symbol='BTC/USD', timeframe='1h'):
+    def train(self, exchange='binance', symbol='BTC/USDT', timeframe='1h'):
         """Train the model on processed data"""
         self.logger.info(f"Training model for {exchange} {symbol} {timeframe}")
         
@@ -211,15 +214,15 @@ class BayesianModel:
         # Calculate linear predictor
         eta = np.dot(X_scaled, betas_post)
         
-        # Add intercepts
-        for i in range(len(alpha_post)):
-            eta[:, i] = eta[:, i] + alpha_post[i]
-        
         # Calculate ordered logit probabilities
         probs = np.zeros((len(X), 3))
         
-        probs[:, 0] = 1 / (1 + np.exp(eta[:, 0]))  # P(short)
-        probs[:, 1] = 1 / (1 + np.exp(eta[:, 1])) - probs[:, 0]  # P(no trade)
-        probs[:, 2] = 1 - probs[:, 0] - probs[:, 1]  # P(long)
+        # Use sigmoid to convert to probabilities
+        p0 = 1 / (1 + np.exp(-(alpha_post[0] - eta)))  # P(y <= 0)
+        p1 = 1 / (1 + np.exp(-(alpha_post[1] - eta)))  # P(y <= 1)
+        
+        probs[:, 0] = p0  # P(y=0) = P(y<=0)
+        probs[:, 1] = p1 - p0  # P(y=1) = P(y<=1) - P(y<=0)
+        probs[:, 2] = 1 - p1  # P(y=2) = 1 - P(y<=1)
         
         return probs
