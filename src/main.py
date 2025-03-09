@@ -46,6 +46,8 @@ def main():
                         help='Specific timeframes to process (e.g., 1h 4h 1d)')
     parser.add_argument('--exchange', type=str, default=None,
                         help='Specific exchange to use (default: first exchange in config)')
+    parser.add_argument('--template', type=str,
+                        help='Use a predefined template (e.g., crypto_majors, altcoins)')
     args = parser.parse_args()
     
     # Setup logging
@@ -69,6 +71,18 @@ def main():
     if args.exchange:
         config['data']['exchanges'] = [args.exchange] + [e for e in config['data']['exchanges'] if e != args.exchange]
         logger.info(f"Using exchange from command line: {args.exchange}")
+        
+    if args.template:
+        template_path = f"config/templates/{args.template}.yaml"
+        try:
+            with open(template_path, 'r') as file:
+                template_config = yaml.safe_load(file)
+                # Update only the data section
+                if 'data' in template_config:
+                    config['data'] = template_config['data']
+                logger.info(f"Loaded template from {template_path}")
+        except Exception as e:
+            logger.error(f"Error loading template {args.template}: {str(e)}")
     
     # Get symbols, timeframes and exchange for operations
     symbols = config.get('data', {}).get('symbols', [])
@@ -91,6 +105,7 @@ def main():
             logger.info(f"Training on multiple symbols/timeframes: {symbols} {timeframes}")
             model.train_multi(symbols, timeframes, exchange)
         else:
+            logger.info(f"Training on {symbols[0]} {timeframes[0]}")
             model.train(exchange, symbols[0], timeframes[0])
     elif args.mode == 'backtest':
         backtest_engine = BacktestEngine(config)
@@ -100,6 +115,7 @@ def main():
             logger.info(f"Backtesting on multiple symbols/timeframes: {symbols} {timeframes}")
             backtest_engine.run_multi_backtest(symbols, timeframes, exchange)
         else:
+            logger.info(f"Backtesting on {symbols[0]} {timeframes[0]}")
             backtest_engine.run_backtest(exchange, symbols[0], timeframes[0])
     elif args.mode == 'paper':
         logger.info("Paper trading mode not yet implemented")

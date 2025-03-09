@@ -353,8 +353,7 @@ class BacktestEngine:
             
             # Lower plot: Cumulative returns
             axes[1].plot(results.index, results['cumulative_returns'], label='Buy & Hold', color='blue')
-            axes[1].plot(results.index, results['strategy_cumulative'], 
-                       label='Quantum Strategy', color='purple')
+            axes[1].plot(results.index, results['strategy_cumulative'], label='Quantum Strategy', color='purple')
             axes[1].set_title('Strategy Performance')
             axes[1].set_xlabel('Date')
             axes[1].set_ylabel('Cumulative Returns')
@@ -373,4 +372,141 @@ class BacktestEngine:
             
         except Exception as e:
             self.logger.error(f"Error plotting backtest results: {str(e)}")
+            return False
+        
+    def run_multi_backtest(self, symbols, timeframes, exchange='binance'):
+        """Run backtest across multiple symbols and timeframes"""
+        self.logger.info(f"Running multi-symbol backtest for {len(symbols)} symbols and {len(timeframes)} timeframes")
+        
+        # Load the multi-symbol model
+        model_factory = ModelFactory(self.config)
+        model = model_factory.create_model()
+        
+        # Generate model name
+        model_name = model._generate_multi_model_name(symbols, timeframes)
+        
+        # Try to load the model
+        model_dir = Path("models")
+        scaler_path = model_dir / f"{exchange}_{model_name}_scaler.pkl"
+        trace_path = model_dir / f"{exchange}_{model_name}_trace.netcdf"
+        
+        if not scaler_path.exists() or not trace_path.exists():
+            self.logger.error(f"Multi-symbol model files not found. Please train the model first.")
+            return False
+        
+        # Load the model
+        with open(scaler_path, 'rb') as f:
+            model.scaler = pickle.load(f)
+        
+        model.trace = az.from_netcdf(trace_path)
+        
+        # Define a dictionary to store results
+        all_results = {}
+        
+        # Run backtest for each symbol/timeframe
+        for symbol in symbols:
+            symbol_results = {}
+            for timeframe in timeframes:
+                try:
+                    # Load data
+                    symbol_safe = symbol.replace('/', '_')
+                    input_file = Path(f"data/processed/{exchange}/{symbol_safe}/{timeframe}.csv")
+                    
+                    if not input_file.exists():
+                        self.logger.warning(f"No processed data file found at {input_file}")
+                        continue
+                        
+                    df = pd.read_csv(input_file, index_col='timestamp', parse_dates=True)
+                    
+                    # Get predictions
+                    probabilities = model.predict_probabilities(df)
+                    
+                    if probabilities is None:
+                        self.logger.error(f"Failed to get predictions for {symbol} {timeframe}")
+                        continue
+                    
+                    # Run backtest
+                    backtest_results, stats = self._run_quantum_backtest(df, probabilities)
+                    
+                    # Add to results
+                    symbol_results[timeframe] = {
+                        'results': backtest_results,
+                        'stats': stats
+                    }
+                    
+                    # Save individual backtest
+                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    output_dir = Path(f"data/backtest_results/{exchange}/{symbol_safe}")
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    
+                    # Add model name to output for identification
+                    output_file = output_dir / f"{timeframe}_{model_name}_{timestamp}.csv"
+                    backtest_results.to_csv(output_file)
+                    
+                    # Save stats
+                    stats_file = output_dir / f"{timeframe}_{model_name}_{timestamp}_stats.csv"
+                    pd.DataFrame([stats]).to_csv(stats_file, index=False)
+                    
+                    self.logger.info(f"Saved backtest results for {symbol} {timeframe} to {output_file}")
+                    
+                    # Plot results
+                    self._plot_backtest_results(backtest_results, exchange, symbol, 
+                                            f"{timeframe}_{model_name}_{timestamp}")
+                    
+                except Exception as e:
+                    self.logger.error(f"Error during backtest of {symbol} {timeframe}: {str(e)}")
+                    continue
+            
+            if symbol_results:
+                all_results[symbol] = symbol_results
+        
+        # Create a summary report
+        self._create_multi_summary(all_results, symbols, timeframes, exchange, model_name)
+        
+        return True
+
+    def _create_multi_summary(self, all_results, symbols, timeframes, exchange, model_name):
+        """Create a summary report for multi-symbol backtest"""
+        try:
+            # Create a DataFrame for summary metrics
+            metrics = ['win_rate', 'profit_factor', 'final_return', 'total_trades']
+            summary = []
+            
+            for symbol in symbols:
+                if symbol not in all_results:
+                    continue
+                    
+                for timeframe in timeframes:
+                    if timeframe not in all_results[symbol]:
+                        continue
+                    
+                    stats = all_results[symbol][timeframe]['stats']
+                    summary.append({
+                        'symbol': symbol,
+                        'timeframe': timeframe,
+                        'win_rate': stats.get('win_rate', 0),
+                        'profit_factor': stats.get('profit_factor', 0),
+                        'final_return': stats.get('final_return', 0),
+                        'total_trades': stats.get('total_trades', 0)
+                    })
+            
+            if not summary:
+                self.logger.warning("No summary data available")
+                return False
+                
+            summary_df = pd.DataFrame(summary)
+            
+            # Save summary
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            output_dir = Path(f"data/backtest_results/{exchange}/summary")
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            summary_file = output_dir / f"multi_summary_{model_name}_{timestamp}.csv"
+            summary_df.to_csv(summary_file, index=False)
+            
+            self.logger.info(f"Saved summary report to {summary_file}")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Error creating summary report: {str(e)}")
             return False

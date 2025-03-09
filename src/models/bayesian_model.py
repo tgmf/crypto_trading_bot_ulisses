@@ -101,7 +101,7 @@ class BayesianModel:
         self.trace = trace
         return model, trace
     
-    def train(self, exchange='binance', symbol='BTC/USDT', timeframe='1h'):
+    def train(self, exchange='binance', symbol='BTC/USDT', timeframe='1m'):
         """Train the model on processed data"""
         self.logger.info(f"Training model for {exchange} {symbol} {timeframe}")
         
@@ -226,3 +226,99 @@ class BayesianModel:
         probs[:, 2] = 1 - p1  # P(y=2) = 1 - P(y<=1)
         
         return probs
+    
+    def train_multi(self, symbols, timeframes, exchange='binance'):
+        """Train the model on multiple symbols and timeframes"""
+        self.logger.info(f"Training model on multiple symbols and timeframes")
+        
+        # Lists to store all training data
+        all_X = []
+        all_y = []
+        
+        for symbol in symbols:
+            for timeframe in timeframes:
+                self.logger.info(f"Processing {symbol} {timeframe}")
+                
+                try:
+                    # Load processed data
+                    symbol_safe = symbol.replace('/', '_')
+                    input_file = Path(f"data/processed/{exchange}/{symbol_safe}/{timeframe}.csv")
+                    
+                    if not input_file.exists():
+                        self.logger.warning(f"No processed data file found at {input_file}")
+                        continue
+                        
+                    df = pd.read_csv(input_file, index_col='timestamp', parse_dates=True)
+                    
+                    # Create target
+                    df['target'] = self.create_target(df)
+                    
+                    # Prepare training data
+                    X = df[self.feature_cols].values
+                    y = df['target'].values
+                    
+                    # Append to combined datasets
+                    all_X.append(X)
+                    all_y.append(y)
+                    self.logger.info(f"Added {len(X)} rows from {symbol} {timeframe}")
+                    
+                except Exception as e:
+                    self.logger.error(f"Error processing {symbol} {timeframe}: {str(e)}")
+                    continue
+        
+        if not all_X:
+            self.logger.error("No data available for training")
+            return False
+        
+        # Combine all datasets
+        X_combined = np.vstack(all_X)
+        y_combined = np.concatenate(all_y)
+        
+        # Scale features
+        X_combined_scaled = self.scaler.fit_transform(X_combined)
+        
+        # Build and train model
+        self.logger.info(f"Building Bayesian model with {len(X_combined)} rows")
+        self.build_model(X_combined_scaled, y_combined)
+        
+        # Create a model name based on symbols and timeframes
+        model_name = self._generate_multi_model_name(symbols, timeframes)
+        
+        # Save model
+        self.save_model_multi(exchange, model_name)
+        
+        return True
+
+    def _generate_multi_model_name(self, symbols, timeframes):
+        """Generate a consistent name for multi-symbol models"""
+        symbols_str = "_".join([s.replace('/', '_') for s in symbols])
+        timeframes_str = "_".join(timeframes)
+        
+        # Truncate if too long
+        if len(symbols_str) > 40:
+            symbols_str = symbols_str[:37] + "..."
+            
+        return f"multi_{symbols_str}_{timeframes_str}"
+
+    def save_model_multi(self, exchange, model_name):
+        """Save the multi-symbol model"""
+        try:
+            # Create directory
+            model_dir = Path("models")
+            model_dir.mkdir(exist_ok=True)
+            
+            # Save scaler
+            scaler_path = model_dir / f"{exchange}_{model_name}_scaler.pkl"
+            with open(scaler_path, 'wb') as f:
+                pickle.dump(self.scaler, f)
+            
+            # Save trace (posterior samples)
+            trace_path = model_dir / f"{exchange}_{model_name}_trace.netcdf"
+            az.to_netcdf(self.trace, trace_path)
+            
+            self.logger.info(f"Multi-symbol model saved to {model_dir}")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Error saving multi-symbol model: {str(e)}")
+            return False
