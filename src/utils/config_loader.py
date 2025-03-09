@@ -60,19 +60,6 @@ class ConfigLoader:
                     os.environ['BINANCE_TESTNET'].lower() == 'true'
                 )
         
-        # FTX API Keys
-        if 'FTX_API_KEY' in os.environ and 'FTX_API_SECRET' in os.environ:
-            if 'exchanges' not in self.config:
-                self.config['exchanges'] = {}
-            
-            self.config['exchanges']['ftx'] = {
-                'api_key': os.environ['FTX_API_KEY'],
-                'api_secret': os.environ['FTX_API_SECRET']
-            }
-            
-            if 'FTX_SUBACCOUNT' in os.environ:
-                self.config['exchanges']['ftx']['subaccount'] = os.environ['FTX_SUBACCOUNT']
-        
         # Backtesting parameters
         if 'BACKTEST_FEE_RATE' in os.environ:
             if 'backtesting' not in self.config:

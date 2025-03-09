@@ -10,7 +10,7 @@ import os
 import time
 import pandas as pd
 import ccxt
-from datetime import datetime
+from datetime import datetime, date
 from pathlib import Path
 
 class DataCollector:
@@ -42,10 +42,18 @@ class DataCollector:
         """Collect historical data for configured symbols and timeframes"""
         symbols = self.config.get('data', {}).get('symbols', [])
         timeframes = self.config.get('data', {}).get('timeframes', [])
-        start_date = self.config.get('data', {}).get('start_date', '2020-01-01')
+        start_date = self.config.get('data', {}).get('start_date', '2024-01-01')
         
         # Convert start_date to timestamp
-        since = int(datetime.strptime(start_date, '%Y-%m-%d').timestamp() * 1000)
+        if isinstance(start_date, str):
+            # If it's a string, parse it
+            since = int(datetime.strptime(start_date, '%Y-%m-%d').timestamp() * 1000)
+        elif isinstance(start_date, datetime):
+            # If it's already a datetime object
+            since = int(start_date.timestamp() * 1000)
+        else:
+            # Handle date objects
+            since = int(datetime.combine(start_date, datetime.min.time()).timestamp() * 1000)
         
         for exchange_name, exchange in self.exchanges.items():
             for symbol in symbols:

@@ -5,8 +5,3 @@ binance:
   api_key: YOUR_API_KEY_HERE
   api_secret: YOUR_API_SECRET_HERE
   testnet: true  # Set to false for production
-
-ftx:
-  api_key: YOUR_API_KEY_HERE
-  api_secret: YOUR_API_SECRET_HERE
-  subaccount: YOUR_SUBACCOUNT_NAME  # Optional

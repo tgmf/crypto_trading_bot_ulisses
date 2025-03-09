@@ -13,10 +13,9 @@ data:
   symbols:
     - BTC/USD
     - ETH/USD
-  start_date: 2020-01-01
+  start_date: 2024-01-01
   exchanges:
     - binance
-    - ftx
 
 # Backtesting Settings
 backtesting:

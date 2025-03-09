@@ -12,7 +12,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from datetime import datetime
 
-from models.model_factory import ModelFactory
+from ..models.model_factory import ModelFactory
 
 class BacktestEngine:
     """Engine for backtesting trading strategies"""

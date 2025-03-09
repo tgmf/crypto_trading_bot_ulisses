@@ -11,10 +11,10 @@ import sys
 import yaml
 from pathlib import Path
 
-from data.data_collector import DataCollector
-from features.feature_engineering import FeatureEngineer
-from models.model_factory import ModelFactory
-from backtesting.backtest_engine import BacktestEngine
+from src.data.data_collector import DataCollector
+from src.features.feature_engineering import FeatureEngineer
+from src.models.model_factory import ModelFactory
+from src.backtesting.backtest_engine import BacktestEngine
 
 def setup_logging():
     """Configure logging settings"""

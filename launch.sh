@@ -26,15 +26,15 @@ cd "$(dirname "$0")"
 case "$1" in
   collect)
     echo "Collecting historical data..."
-    python src/main.py --mode collect
+    python -m src.main --mode collect
     ;;
   train)
     echo "Training model..."
-    python src/main.py --mode train
+    python -m src.main --mode train
     ;;
   backtest)
     echo "Running backtest..."
-    python src/main.py --mode backtest
+    python -m src.main --mode backtest
     ;;
   notebook)
     echo "Launching Jupyter notebook..."
