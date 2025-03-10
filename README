@@ -1,3 +1,5 @@
+That's an excellent suggestion! Testing model consistency through dataset reversal provides valuable insight into robustness. Let me add this to the README:
+
 # Cryptocurrency Trading Bot
 
 A machine learning powered cryptocurrency trading bot focused on quantum-inspired probabilistic decision making.
@@ -82,6 +84,9 @@ The project includes a convenience script for common operations:
 # Train models with time-series cross-validation
 ./launch.sh train --cv
 
+# Train with reversed datasets (test model stability)
+./launch.sh train --reverse
+
 # Run standard backtests
 ./launch.sh backtest
 
@@ -107,6 +112,9 @@ python src/main.py --mode train --symbols BTC/USDT --timeframes 1h
 # Model Training (with cross-validation)
 python src/main.py --mode train --symbols BTC/USDT --timeframes 1h --cv
 
+# Reverse Train-Test (for model consistency checking)
+python src/main.py --mode train --symbols BTC/USDT --timeframes 1h --reverse
+
 # Standard Backtesting
 python src/main.py --mode backtest --symbols BTC/USDT --timeframes 1h
 
@@ -131,7 +139,13 @@ The system supports multiple testing approaches, each with different strengths:
 - **Features**: Simulates real-world model deployment with periodic retraining
 - **Command**: `python src/main.py --mode backtest --walk-forward`
 
-Both approaches support testing on multiple symbols and timeframes to evaluate model robustness across different assets and time horizons.
+### Reversed Dataset Testing
+- **Use when**: Validating model consistency and robustness
+- **Features**: Trains on original test set and tests on original training set
+- **Benefits**: Helps detect model instability, dataset peculiarities, or overfitting
+- **Command**: `python src/main.py --mode train --reverse`
+
+All approaches support testing on multiple symbols and timeframes to evaluate model robustness across different assets and time horizons.
 
 ## Implementation Approach
 
@@ -146,6 +160,7 @@ This project follows a step-by-step development approach:
    - Bayesian model implementation with train-test separation
    - Time-series cross-validation
    - Walk-forward testing
+   - Dataset reversal validation
 
 3. **Phase 3: Advanced Model Development**
    - Quantum-inspired model implementation
@@ -182,6 +197,7 @@ The system enforces proper train-test separation to ensure reliable performance 
 - Chronological data splitting (no random splitting)
 - Reserved test sets for final evaluation
 - Walk-forward testing for simulating real-world deployment
+- Dataset reversal testing for consistency validation
 
 ## Configuration
 
@@ -205,6 +221,22 @@ walk_forward:
   test_window: 30    # Testing window in days
   step_size: 30      # Step size in days
 ```
+
+## Model Consistency Evaluation
+
+A truly robust trading model should demonstrate consistent performance regardless of the specific dataset used for training and testing. The dataset reversal testing:
+
+1. Trains a model on what was originally designated as the test set
+2. Tests this model on what was originally used for training
+3. Compares performance metrics between the original and reversed approaches
+
+This approach helps identify:
+- **Overfitting**: Large performance discrepancies between the two setups
+- **Data Peculiarities**: Special characteristics in either dataset
+- **Model Stability**: Consistency of feature importance rankings
+- **Regime Shifts**: Performance differences due to different market conditions
+
+A reliable model will show similar (not identical) performance characteristics in both arrangements, while an overfit or unstable model will show dramatic differences.
 
 ## License
 

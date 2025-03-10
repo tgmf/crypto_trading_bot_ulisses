@@ -52,6 +52,8 @@ def main():
                         help='Use a predefined template (e.g., crypto_majors, altcoins)')  # Argument for specifying a template
     parser.add_argument('--walk-forward', action='store_true',
                         help='Use walk-forward testing instead of standard backtesting') # Argument for enabling walk-forward testing
+    parser.add_argument('--reverse', action='store_true',
+                        help='Train on test set and evaluate on training set (for model consistency testing)')  # Argument for enabling reverse testing
     args = parser.parse_args()  # Parse the command-line arguments
     
     # Setup logging
@@ -104,15 +106,28 @@ def main():
         model_factory = ModelFactory(config)  # Initialize the model factory
         model = model_factory.create_model()  # Create a model
         
-        # Check if training on multiple symbols/timeframes
+        # Check for multi-symbol/timeframe training
         if len(symbols) > 1 or len(timeframes) > 1:
             logger.info(f"Training on multiple symbols/timeframes: {symbols} {timeframes}")  # Log the training details
-            # You'll need to adapt this method for the enhanced model
+            # Multi-symbol training currently doesn't support reversal
+            if args.reverse:
+                logger.warning("Reverse training not supported for multi-symbol mode. Falling back to standard training.")
+            if args.cv:
+                logger.warning("Cross-validation not supported for multi-symbol mode. Falling back to standard training.")
             model.train_multi(symbols, timeframes, exchange)  # Train on multiple symbols/timeframes
         else:
-            logger.info(f"Training on {symbols[0]} {timeframes[0]} with proper CV")
-            # Use the new training method with cross-validation
-            model.train(exchange, symbols[0], timeframes[0])  # Train on a single symbol/timeframe
+            if args.reverse:
+                # Use reversed dataset training
+                logger.info(f"Training with reversed datasets for {symbols[0]} {timeframes[0]} (for consistency testing)")
+                model.train_with_reversed_datasets(exchange, symbols[0], timeframes[0])  # Train on a single symbol/timeframe with reversed datasets
+            elif args.cv:
+                # Use time-series cross-validation
+                logger.info(f"Training with time-series cross-validation for {symbols[0]} {timeframes[0]}")
+                model.train_with_cv(exchange, symbols[0], timeframes[0])  # Train on a single symbol/timeframe with time-series cross-validation
+            else:
+                # Standard training with train-test split
+                logger.info(f"Training with standard train-test split for {symbols[0]} {timeframes[0]}")
+                model.train(exchange, symbols[0], timeframes[0])  # Train on a single symbol/timeframe
     elif args.mode == 'backtest':
         # Create the appropriate tester based on command-line arguments
         if args.walk_forward:

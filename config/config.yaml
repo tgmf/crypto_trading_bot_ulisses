@@ -19,3 +19,10 @@ data:
   alternative_sources:
     - yfinance
     - cryptocompare
+
+# Backtesting Settings
+walk_forward:
+  train_window: 180  # Training window in ticks
+  test_window: 30    # Testing window in ticks
+  step_size: 30      # Step size in ticks
+  min_train_samples: 1000  # Minimum samples needed for training

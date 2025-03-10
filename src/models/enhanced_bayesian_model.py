@@ -15,6 +15,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import TimeSeriesSplit
 import pickle
 import matplotlib.pyplot as plt
+import json
 
 class EnhancedBayesianModel:
     """Bayesian model for trading signals with proper train/test separation"""
@@ -411,3 +412,304 @@ class EnhancedBayesianModel:
         probs[:, 2] = 1 - p1  # P(y=2) = 1 - P(y<=1)
         
         return probs
+    
+    def train_with_reversed_datasets(self, exchange='binance', symbol='BTC/USDT', timeframe='1h', test_size=0.3):
+        """
+        Train model with reversed datasets to test consistency and robustness
+        
+        This method:
+        1. Loads the original train-test split (if available)
+        2. If not, creates a new split and first runs normal training
+        3. Reverses the datasets (trains on test, tests on train)
+        4. Saves the model with a 'reversed' indicator
+        5. Evaluates and compares performance on both approaches
+        
+        Args:
+            exchange (str): Exchange name
+            symbol (str): Trading pair symbol
+            timeframe (str): Data timeframe
+            test_size (float): Proportion of data to use for testing (0.0-1.0)
+            
+        Returns:
+            tuple: (train_df, test_df, comparison_metrics) if successful, False otherwise
+        """
+        self.logger.info(f"Training model with reversed datasets for {exchange} {symbol} {timeframe}")
+        
+        try:
+            # First, check if we already have a test set
+            symbol_safe = symbol.replace('/', '_')
+            test_file = Path(f"data/test_sets/{exchange}/{symbol_safe}/{timeframe}_test.csv")
+            
+            if test_file.exists():
+                # Load existing test set
+                self.logger.info(f"Loading existing test set from {test_file}")
+                test_df = pd.read_csv(test_file, index_col='timestamp', parse_dates=True)
+                
+                # Load original data to get the training set
+                input_file = Path(f"data/processed/{exchange}/{symbol_safe}/{timeframe}.csv")
+                full_df = pd.read_csv(input_file, index_col='timestamp', parse_dates=True)
+                
+                # Identify training data (all data not in test set)
+                # We match by index (timestamp) rather than trying to guess split ratio
+                train_df = full_df[~full_df.index.isin(test_df.index)].copy()
+                
+                self.logger.info(f"Identified original training set with {len(train_df)} samples")
+            else:
+                # No existing test set, create a new split and run normal training first
+                self.logger.info("No existing test set found. Creating new train-test split")
+                
+                # Load data
+                input_file = Path(f"data/processed/{exchange}/{symbol_safe}/{timeframe}.csv")
+                full_df = pd.read_csv(input_file, index_col='timestamp', parse_dates=True)
+                
+                # Create target
+                full_df['target'] = self.create_target(full_df)
+                
+                # Drop rows with NaN targets
+                full_df = full_df.dropna(subset=['target'])
+                
+                # Chronological train-test split
+                train_size = int(len(full_df) * (1 - test_size))
+                train_df = full_df.iloc[:train_size].copy()
+                test_df = full_df.iloc[train_size:].copy()
+                
+                self.logger.info(f"Created new train-test split: train={len(train_df)}, test={len(test_df)} samples")
+                
+                # Save test set for future use
+                test_output_dir = Path(f"data/test_sets/{exchange}/{symbol_safe}")
+                test_output_dir.mkdir(parents=True, exist_ok=True)
+                test_output_file = test_output_dir / f"{timeframe}_test.csv"
+                test_df.to_csv(test_output_file)
+                self.logger.info(f"Saved test set to {test_output_file}")
+                
+                # Run normal training first
+                self.logger.info("Running normal training first")
+                X_train = train_df[self.feature_cols].values
+                y_train = train_df['target'].values
+                
+                # Scale features
+                X_train_scaled = self.scaler.fit_transform(X_train)
+                
+                # Build and train model
+                self.build_model(X_train_scaled, y_train)
+                
+                # Save original model
+                self.save_model(exchange, symbol, timeframe)
+                self.logger.info("Original model trained and saved")
+            
+            # Now for the reversed training
+            self.logger.info("Starting reversed training (train on test, test on train)")
+            
+            # Ensure both datasets have target variable
+            if 'target' not in train_df.columns:
+                train_df['target'] = self.create_target(train_df)
+            if 'target' not in test_df.columns:
+                test_df['target'] = self.create_target(test_df)
+            
+            # Prepare reversed training
+            # Original test set becomes training data
+            X_train_reversed = test_df[self.feature_cols].values
+            y_train_reversed = test_df['target'].values
+            
+            # Create a new scaler for the reversed model
+            self.scaler = StandardScaler()
+            
+            # Scale features
+            X_train_reversed_scaled = self.scaler.fit_transform(X_train_reversed)
+            
+            # Build and train reversed model
+            self.logger.info(f"Training reversed model on {len(test_df)} samples")
+            self.build_model(X_train_reversed_scaled, y_train_reversed)
+            
+            # Save reversed model with indicator
+            self.save_model(exchange, symbol, f"{timeframe}_reversed")
+            
+            # Evaluate original and reversed models
+            self.logger.info("Evaluating both models for comparison")
+            
+            # Load the original model for comparison
+            original_model = self.__class__(self.config)
+            original_model.load_model(exchange, symbol, timeframe)
+            
+            # Test original model on original test set
+            X_orig_test = test_df[self.feature_cols].values
+            X_orig_test_scaled = original_model.scaler.transform(X_orig_test)
+            orig_probs = original_model._predict_probs(X_orig_test_scaled)
+            orig_preds = np.argmax(orig_probs, axis=1) - 1  # Convert back to -1, 0, 1
+            orig_acc = np.mean(orig_preds == test_df['target'].values)
+            
+            # Test reversed model on original training set
+            X_rev_test = train_df[self.feature_cols].values
+            X_rev_test_scaled = self.scaler.transform(X_rev_test)
+            rev_probs = self._predict_probs(X_rev_test_scaled)
+            rev_preds = np.argmax(rev_probs, axis=1) - 1  # Convert back to -1, 0, 1
+            rev_acc = np.mean(rev_preds == train_df['target'].values)
+            
+            # Compare feature importances
+            orig_importances = np.abs(original_model.trace.posterior["betas"].mean(("chain", "draw")).values)
+            rev_importances = np.abs(self.trace.posterior["betas"].mean(("chain", "draw")).values)
+            
+            orig_ranks = np.argsort(-orig_importances)
+            rev_ranks = np.argsort(-rev_importances)
+            
+            # Calculate rank correlation
+            rank_correlation = np.corrcoef(orig_ranks, rev_ranks)[0, 1]
+            
+            # Assemble comparison metrics
+            comparison_metrics = {
+                'original_accuracy': orig_acc,
+                'reversed_accuracy': rev_acc,
+                'accuracy_difference': abs(orig_acc - rev_acc),
+                'feature_importance_correlation': rank_correlation,
+                'original_feature_importance': dict(zip(self.feature_cols, orig_importances)),
+                'reversed_feature_importance': dict(zip(self.feature_cols, rev_importances))
+            }
+            
+            # Save comparison metrics
+            metrics_dir = Path(f"models/comparisons/{exchange}/{symbol_safe}")
+            metrics_dir.mkdir(parents=True, exist_ok=True)
+            
+            metrics_file = metrics_dir / f"{timeframe}_consistency_metrics.json"
+            with open(metrics_file, 'w') as f:
+                json.dump(comparison_metrics, f, indent=4)
+            
+            # Create visualization of model consistency
+            self._plot_model_consistency(comparison_metrics, exchange, symbol, timeframe)
+            
+            # Log summary
+            self.logger.info(f"Model consistency evaluation complete:")
+            self.logger.info(f"Original accuracy: {orig_acc:.4f}")
+            self.logger.info(f"Reversed accuracy: {rev_acc:.4f}")
+            self.logger.info(f"Accuracy difference: {abs(orig_acc - rev_acc):.4f}")
+            self.logger.info(f"Feature importance correlation: {rank_correlation:.4f}")
+            
+            # Provide interpretation
+            if abs(orig_acc - rev_acc) < 0.1 and rank_correlation > 0.7:
+                self.logger.info("CONCLUSION: Model shows good consistency across datasets")
+            elif abs(orig_acc - rev_acc) < 0.2 and rank_correlation > 0.5:
+                self.logger.info("CONCLUSION: Model shows moderate consistency across datasets")
+            else:
+                self.logger.warning("CONCLUSION: Model shows poor consistency, may be overfit or unstable")
+            
+            return train_df, test_df, comparison_metrics
+            
+        except Exception as e:
+            self.logger.error(f"Error training with reversed datasets: {str(e)}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            return False
+            
+    def _predict_probs(self, X):
+        """
+        Predict probabilities using the current model
+        
+        Args:
+            X (ndarray): Feature matrix (scaled)
+            
+        Returns:
+            ndarray: Probability array [P(short), P(no_trade), P(long)]
+        """
+        # Get parameter posteriors
+        alpha_post = self.trace.posterior["alpha"].mean(("chain", "draw")).values
+        betas_post = self.trace.posterior["betas"].mean(("chain", "draw")).values
+        
+        # Calculate linear predictor
+        eta = np.dot(X, betas_post)
+        
+        # Calculate ordered logit probabilities
+        probs = np.zeros((len(X), 3))
+        
+        # Use sigmoid to convert to probabilities
+        p0 = 1 / (1 + np.exp(-(alpha_post[0] - eta)))  # P(y <= 0)
+        p1 = 1 / (1 + np.exp(-(alpha_post[1] - eta)))  # P(y <= 1)
+        
+        probs[:, 0] = p0  # P(y=0) = P(y<=0)
+        probs[:, 1] = p1 - p0  # P(y=1) = P(y<=1) - P(y<=0)
+        probs[:, 2] = 1 - p1  # P(y=2) = 1 - P(y<=1)
+        
+        return probs
+
+    def _plot_model_consistency(self, metrics, exchange, symbol, timeframe):
+        """
+        Create visualizations of model consistency metrics
+        
+        Args:
+            metrics (dict): Dictionary with comparison metrics
+            exchange (str): Exchange name
+            symbol (str): Trading pair symbol
+            timeframe (str): Data timeframe
+        """
+        try:
+            # Create output directory
+            symbol_safe = symbol.replace('/', '_')
+            output_dir = Path(f"models/comparisons/{exchange}/{symbol_safe}")
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Create figure with 2 subplots
+            fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+            
+            # Plot 1: Accuracy comparison
+            accuracies = [metrics['original_accuracy'], metrics['reversed_accuracy']]
+            axes[0].bar(['Original', 'Reversed'], accuracies, color=['blue', 'orange'])
+            axes[0].set_ylim(0, 1)
+            axes[0].set_title('Accuracy Comparison')
+            axes[0].set_ylabel('Accuracy')
+            
+            # Add text annotations
+            for i, v in enumerate(accuracies):
+                axes[0].text(i, v + 0.01, f'{v:.4f}', ha='center')
+            
+            # Add difference annotation
+            diff = metrics['accuracy_difference']
+            axes[0].text(0.5, 0.5, f'Difference: {diff:.4f}', 
+                    ha='center', va='center', 
+                    bbox=dict(boxstyle='round', facecolor='white', alpha=0.7),
+                    transform=axes[0].transAxes)
+            
+            # Plot 2: Feature importance comparison
+            orig_imp = metrics['original_feature_importance']
+            rev_imp = metrics['reversed_feature_importance']
+            
+            # Sort features by original importance
+            sorted_features = sorted(orig_imp.keys(), key=lambda x: orig_imp[x], reverse=True)
+            
+            # Prepare data for bar chart
+            orig_values = [orig_imp[f] for f in sorted_features]
+            rev_values = [rev_imp[f] for f in sorted_features]
+            
+            # Get x positions
+            x = np.arange(len(sorted_features))
+            width = 0.35
+            
+            # Create grouped bar chart
+            axes[1].bar(x - width/2, orig_values, width, label='Original')
+            axes[1].bar(x + width/2, rev_values, width, label='Reversed')
+            
+            axes[1].set_title('Feature Importance Comparison')
+            axes[1].set_ylabel('Absolute Importance')
+            axes[1].set_xticks(x)
+            axes[1].set_xticklabels(sorted_features, rotation=45, ha='right')
+            axes[1].legend()
+            
+            # Add correlation annotation
+            corr = metrics['feature_importance_correlation']
+            axes[1].text(0.5, 0.9, f'Rank Correlation: {corr:.4f}', 
+                    ha='center', va='center', 
+                    bbox=dict(boxstyle='round', facecolor='white', alpha=0.7),
+                    transform=axes[1].transAxes)
+            
+            # Set overall title
+            plt.suptitle(f'Model Consistency Evaluation - {symbol} {timeframe}', fontsize=16)
+            
+            plt.tight_layout()
+            plt.subplots_adjust(top=0.9)
+            
+            # Save figure
+            plot_file = output_dir / f"{timeframe}_consistency_plot.png"
+            plt.savefig(plot_file)
+            plt.close(fig)
+            
+            self.logger.info(f"Model consistency plot saved to {plot_file}")
+            
+        except Exception as e:
+            self.logger.error(f"Error plotting model consistency: {str(e)}")

@@ -150,33 +150,33 @@ class BacktestEngine:
         df_backtest = df.copy()
         
         # Initialize columns for tracking positions and returns
-        df_backtest['short_prob'] = probabilities[:, 0]
-        df_backtest['no_trade_prob'] = probabilities[:, 1]
-        df_backtest['long_prob'] = probabilities[:, 2]
-        df_backtest['position'] = 0  # -1=short, 0=flat, 1=long, 2=hedged
-        df_backtest['entry_price'] = np.nan
-        df_backtest['exit_price'] = np.nan
-        df_backtest['trade_return'] = np.nan
-        df_backtest['trade_duration'] = np.nan
+        df_backtest['short_prob'] = probabilities[:, 0]  # Probability of short position
+        df_backtest['no_trade_prob'] = probabilities[:, 1]  # Probability of no position
+        df_backtest['long_prob'] = probabilities[:, 2]  # Probability of long position
+        df_backtest['position'] = 0  # Position state: -1=short, 0=flat, 1=long, 2=hedged
+        df_backtest['entry_price'] = np.nan  # Price at position entry
+        df_backtest['exit_price'] = np.nan  # Price at position exit
+        df_backtest['trade_return'] = np.nan  # Return of individual trades
+        df_backtest['trade_duration'] = np.nan  # Duration of trades in bars
         
         # Simulate trading
         position = 0  # Start with no position
-        entry_idx = 0
-        entry_price = 0
+        entry_idx = 0  # Index of entry bar
+        entry_price = 0  # Price at entry
         
         for i in range(1, len(df_backtest) - 1):
             current_price = df_backtest['close'].iloc[i]
             
             # Get current probabilities
-            short_prob = probabilities[i, 0]
-            no_trade_prob = probabilities[i, 1]
-            long_prob = probabilities[i, 2]
+            short_prob = probabilities[i, 0]  # Probability of profitable short opportunity
+            no_trade_prob = probabilities[i, 1]  # Probability of no profitable opportunity
+            long_prob = probabilities[i, 2]  # Probability of profitable long opportunity
             
             # Update position based on current state and probabilities
             if position == 0:  # Currently flat
                 # Check for new position signals
                 if long_prob > threshold:
-                    # Enter long position
+                    # Enter long position when long probability exceeds threshold
                     position = 1
                     entry_idx = i
                     entry_price = current_price
@@ -184,7 +184,7 @@ class BacktestEngine:
                     df_backtest.loc[df_backtest.index[i], 'entry_price'] = current_price
                 
                 elif short_prob > threshold:
-                    # Enter short position
+                    # Enter short position when short probability exceeds threshold
                     position = -1
                     entry_idx = i
                     entry_price = current_price
@@ -193,7 +193,8 @@ class BacktestEngine:
                 
                 # Handle quantum edge case: both probabilities high
                 elif long_prob > hedge_threshold and short_prob > hedge_threshold:
-                    # Enter hedged position if both signals are strong
+                    # Enter hedged position if both signals are strong - this is unique to quantum approach
+                    # Hedging means simultaneously holding long and short positions
                     position = 2  # Hedged
                     entry_idx = i
                     entry_price = current_price
@@ -203,17 +204,19 @@ class BacktestEngine:
             elif position == 1:  # Currently long
                 # Check for exit or hedge signals
                 if long_prob < 0.3 or short_prob > threshold:
-                    # Exit long position
+                    # Exit long position if long probability drops or short probability rises
                     df_backtest.loc[df_backtest.index[i], 'exit_price'] = current_price
                     df_backtest.loc[df_backtest.index[i], 'position'] = 0
                     
                     # Calculate return (accounting for fees)
+                    # Return = (exit price / entry price) - 1 - round-trip fees
                     trade_return = (current_price / entry_price) - 1 - (self.fee_rate * 2)
                     df_backtest.loc[df_backtest.index[i], 'trade_return'] = trade_return
                     df_backtest.loc[df_backtest.index[i], 'trade_duration'] = i - entry_idx
                     
                     # Check for immediate reversal to short
                     if short_prob > threshold:
+                        # If short signal is strong, immediately enter short position
                         position = -1
                         entry_idx = i
                         entry_price = current_price
@@ -223,28 +226,30 @@ class BacktestEngine:
                         position = 0
                 
                 elif short_prob > hedge_threshold:
-                    # Add hedge to long position
+                    # Add hedge to long position if short signal strengthens
                     position = 2  # Hedged
                     df_backtest.loc[df_backtest.index[i], 'position'] = 2
                 
                 else:
-                    # Stay in long position
+                    # Stay in long position if no exit signals
                     df_backtest.loc[df_backtest.index[i], 'position'] = 1
             
             elif position == -1:  # Currently short
                 # Check for exit or hedge signals
                 if short_prob < 0.3 or long_prob > threshold:
-                    # Exit short position
+                    # Exit short position if short probability drops or long probability rises
                     df_backtest.loc[df_backtest.index[i], 'exit_price'] = current_price
                     df_backtest.loc[df_backtest.index[i], 'position'] = 0
                     
                     # Calculate return (accounting for fees)
+                    # Short return = 1 - (exit price / entry price) - round-trip fees
                     trade_return = 1 - (current_price / entry_price) - (self.fee_rate * 2)
                     df_backtest.loc[df_backtest.index[i], 'trade_return'] = trade_return
                     df_backtest.loc[df_backtest.index[i], 'trade_duration'] = i - entry_idx
                     
                     # Check for immediate reversal to long
                     if long_prob > threshold:
+                        # If long signal is strong, immediately enter long position
                         position = 1
                         entry_idx = i
                         entry_price = current_price
@@ -254,22 +259,23 @@ class BacktestEngine:
                         position = 0
                 
                 elif long_prob > hedge_threshold:
-                    # Add hedge to short position
+                    # Add hedge to short position if long signal strengthens
                     position = 2  # Hedged
                     df_backtest.loc[df_backtest.index[i], 'position'] = 2
                 
                 else:
-                    # Stay in short position
+                    # Stay in short position if no exit signals
                     df_backtest.loc[df_backtest.index[i], 'position'] = -1
             
             elif position == 2:  # Currently hedged
                 # Check for removing hedge
                 if long_prob < hedge_threshold and short_prob < hedge_threshold:
-                    # Exit hedged position
+                    # Exit hedged position if both signals weaken
                     df_backtest.loc[df_backtest.index[i], 'exit_price'] = current_price
                     df_backtest.loc[df_backtest.index[i], 'position'] = 0
                     
                     # Hedged positions typically have near-zero returns plus double fees
+                    # We approximate this as the cost of the double hedging fees
                     trade_return = -(self.fee_rate * 4)  # Approximate cost of hedging
                     df_backtest.loc[df_backtest.index[i], 'trade_return'] = trade_return
                     df_backtest.loc[df_backtest.index[i], 'trade_duration'] = i - entry_idx
@@ -277,17 +283,17 @@ class BacktestEngine:
                     position = 0
                 
                 elif long_prob > threshold and short_prob < hedge_threshold:
-                    # Convert hedge to pure long
+                    # Convert hedge to pure long if long signal strengthens and short weakens
                     position = 1
                     df_backtest.loc[df_backtest.index[i], 'position'] = 1
                 
                 elif short_prob > threshold and long_prob < hedge_threshold:
-                    # Convert hedge to pure short
+                    # Convert hedge to pure short if short signal strengthens and long weakens
                     position = -1
                     df_backtest.loc[df_backtest.index[i], 'position'] = -1
                 
                 else:
-                    # Stay hedged
+                    # Stay hedged if signals remain conflicted
                     df_backtest.loc[df_backtest.index[i], 'position'] = 2
         
         # Close any open position at the end
@@ -335,13 +341,13 @@ class BacktestEngine:
             'hedged_trades': (trades['position'] == 2).sum(),
             'win_rate': (trades['trade_return'] > 0).mean() if len(trades) > 0 else 0,
             'avg_win': trades.loc[trades['trade_return'] > 0, 'trade_return'].mean() 
-                    if (trades['trade_return'] > 0).any() else 0,
+                        if (trades['trade_return'] > 0).any() else 0,
             'avg_loss': trades.loc[trades['trade_return'] < 0, 'trade_return'].mean() 
-                    if (trades['trade_return'] < 0).any() else 0,
+                        if (trades['trade_return'] < 0).any() else 0,
             'profit_factor': abs(trades.loc[trades['trade_return'] > 0, 'trade_return'].sum() / 
-                    trades.loc[trades['trade_return'] < 0, 'trade_return'].sum()) 
-                    if (trades['trade_return'] < 0).any() and 
-                    (trades['trade_return'] > 0).any() else float('inf'),
+                                trades.loc[trades['trade_return'] < 0, 'trade_return'].sum()) 
+                                if (trades['trade_return'] < 0).any() and 
+                                    (trades['trade_return'] > 0).any() else float('inf'),
             'avg_trade_duration': trades['trade_duration'].mean() if len(trades) > 0 else 0,
             'final_return': df_backtest['strategy_cumulative'].iloc[-1]
         }
