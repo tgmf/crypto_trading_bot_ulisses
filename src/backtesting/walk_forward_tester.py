@@ -38,7 +38,7 @@ class WalkForwardTester:
         self.step_size = self.wf_config.get('step_size', 30)         # Step size for rolling window in days
         self.min_train_samples = self.wf_config.get('min_train_samples', 1000)  # Minimum samples for training
     
-    def run_walk_forward_test(self, exchange='binance', symbol='BTC/USDT', timeframe='1h'):
+    def run_test(self, exchange='binance', symbol='BTC/USDT', timeframe='1h'):
         """
         Run Walk-Forward Testing for a given symbol and timeframe
         
@@ -491,7 +491,7 @@ class WalkForwardTester:
             self.logger.error(f"Error plotting walk-forward performance: {str(e)}")
             return False
     
-    def run_multi_walk_forward_test(self, symbols, timeframes, exchange='binance'):
+    def run_multi_test(self, symbols, timeframes, exchange='binance'):
         """
         Run walk-forward tests across multiple symbols and timeframes
         
@@ -518,7 +518,7 @@ class WalkForwardTester:
                 
                 try:
                     # Run walk-forward test for this symbol/timeframe
-                    results, performance = self.run_walk_forward_test(
+                    results, performance = self.run_test(
                         exchange=exchange,
                         symbol=symbol,
                         timeframe=timeframe

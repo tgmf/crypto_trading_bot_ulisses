@@ -9,14 +9,16 @@ This project implements a sophisticated cryptocurrency trading system using Baye
 - Fee-aware model training and evaluation
 - Probabilistic three-state decision making (long, short, no trade)
 - Comprehensive risk management
-- Realistic backtesting
+- Proper train-test separation for reliable performance evaluation
 
 ## Project Structure
 
-- **data/** - Raw and processed market data
+- **data/** - Data storage
   - **raw/** - Original data from exchanges
   - **processed/** - Feature-engineered data
+  - **test_sets/** - Reserved test data for unbiased evaluation
   - **backtest_results/** - Backtest outputs and metrics
+  - **walk_forward_results/** - Walk-forward testing results
 - **src/** - Source code
   - **data/** - Data collection and management
   - **features/** - Feature engineering
@@ -45,36 +47,20 @@ conda activate trading_env
 
 # Install dependencies
 pip install -r requirements.txt
+
+# Create necessary directories
+mkdir -p data/test_sets
+mkdir -p data/walk_forward_results
 ```
 
-### Docker and Conda Together
-
-This project uses both conda and Docker for different aspects of the development workflow:
-
-#### Development Environment (Conda)
-- Provides your Python environment with required packages
-- Used for active development, testing, and quick iterations
-- Faster for day-to-day development without container rebuilds
+### Docker Setup
 
 ```bash
-# For active development
-conda activate trading_env
-```
-
-#### Reproducible Environment (Docker)
-- Provides a complete, isolated environment (OS, Python, dependencies)
-- Ensures consistent behavior across different machines
-- Ideal for deployment and sharing with others
-
-```bash
-# Build Docker container (run from WSL bash, not within conda)
+# Build Docker container
 docker-compose build
 
 # Start services defined in docker-compose.yml
 docker-compose up
-```
-
-**Typical Workflow:** Develop initially in conda for speed, then periodically test in Docker to ensure everything works in a clean, reproducible environment.
 ```
 
 ## Usage
@@ -90,11 +76,17 @@ The project includes a convenience script for common operations:
 # Collect historical data from exchanges
 ./launch.sh collect
 
-# Train models on collected data
+# Train models with proper train-test split
 ./launch.sh train
 
-# Run backtests on trained models
+# Train models with time-series cross-validation
+./launch.sh train --cv
+
+# Run standard backtests
 ./launch.sh backtest
+
+# Run walk-forward tests
+./launch.sh backtest --walk-forward
 
 # Launch Jupyter notebook for analysis
 ./launch.sh notebook
@@ -107,14 +99,39 @@ The project includes a convenience script for common operations:
 conda activate trading_env
 
 # Data Collection
-python src/main.py --mode collect
+python src/main.py --mode collect --symbols BTC/USDT ETH/USDT --timeframes 1h 4h
 
-# Model Training
-python src/main.py --mode train
+# Model Training (with train-test split)
+python src/main.py --mode train --symbols BTC/USDT --timeframes 1h
 
-# Backtesting
-python src/main.py --mode backtest
+# Model Training (with cross-validation)
+python src/main.py --mode train --symbols BTC/USDT --timeframes 1h --cv
+
+# Standard Backtesting
+python src/main.py --mode backtest --symbols BTC/USDT --timeframes 1h
+
+# Walk-Forward Testing
+python src/main.py --mode backtest --symbols BTC/USDT --timeframes 1h --walk-forward
+
+# Multi-Symbol Testing
+python src/main.py --mode backtest --symbols BTC/USDT ETH/USDT --timeframes 1h 4h
 ```
+
+## Testing Approaches
+
+The system supports multiple testing approaches, each with different strengths:
+
+### Standard Backtesting
+- **Use when**: Quickly evaluating a model on historical data
+- **Features**: Automatically uses test data when available
+- **Command**: `python src/main.py --mode backtest`
+
+### Walk-Forward Testing
+- **Use when**: Evaluating how a model performs with periodic retraining
+- **Features**: Simulates real-world model deployment with periodic retraining
+- **Command**: `python src/main.py --mode backtest --walk-forward`
+
+Both approaches support testing on multiple symbols and timeframes to evaluate model robustness across different assets and time horizons.
 
 ## Implementation Approach
 
@@ -125,10 +142,10 @@ This project follows a step-by-step development approach:
    - Data collection infrastructure
    - Feature engineering framework
 
-2. **Phase 2: Model Development and Initial Testing**
-   - Basic Bayesian model implementation
-   - Initial backtesting framework
-   - Simple strategy implementation
+2. **Phase 2: Model Development and Proper Evaluation**
+   - Bayesian model implementation with train-test separation
+   - Time-series cross-validation
+   - Walk-forward testing
 
 3. **Phase 3: Advanced Model Development**
    - Quantum-inspired model implementation
@@ -139,11 +156,6 @@ This project follows a step-by-step development approach:
    - Dynamic position sizing
    - Enhanced risk management
    - Market regime detection
-
-5. **Phase 5: Production Deployment and Monitoring**
-   - Exchange integration
-   - Monitoring dashboard
-   - Performance tracking
 
 ## Key Features
 
@@ -164,11 +176,35 @@ Instead of forced classification, it outputs probabilities for each state, enabl
 
 All models are trained with explicit incorporation of trading fees, ensuring that signals only trigger when the expected profit exceeds transaction costs plus a minimum profit threshold.
 
-## Testing Strategy
+### Proper Model Evaluation
 
-- Begin with paper trading
-- Implement risk controls from the start
-- Always account for fees in your metrics
+The system enforces proper train-test separation to ensure reliable performance estimates:
+- Chronological data splitting (no random splitting)
+- Reserved test sets for final evaluation
+- Walk-forward testing for simulating real-world deployment
+
+## Configuration
+
+Key configuration options in `config/config.yaml`:
+
+```yaml
+# Data Collection Settings
+data:
+  timeframes: [1m, 5m, 15m, 1h, 4h]
+  symbols: [BTC/USD, ETH/USD, BTC/USDT, ETH/USDT]
+  exchanges: [binance, kraken, kucoin]
+
+# Backtesting Parameters
+backtesting:
+  fee_rate: 0.0006  # Per-side fee rate
+  min_profit_target: 0.008  # Minimum profit threshold
+
+# Walk-Forward Parameters
+walk_forward:
+  train_window: 180  # Training window in days
+  test_window: 30    # Testing window in days
+  step_size: 30      # Step size in days
+```
 
 ## License
 

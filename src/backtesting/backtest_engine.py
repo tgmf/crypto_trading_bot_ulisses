@@ -43,7 +43,7 @@ class BacktestEngine:
         # Extract fee rate from config or use default value
         self.fee_rate = self.config.get('backtesting', {}).get('fee_rate', 0.0006)
         
-    def run_backtest(self, exchange='binance', symbol='BTC/USDT', timeframe='1m'):
+    def run_test(self, exchange='binance', symbol='BTC/USDT', timeframe='1m'):
         """
         Run backtest for a given model and dataset
         
@@ -450,7 +450,7 @@ class BacktestEngine:
             self.logger.error(f"Error plotting backtest results: {str(e)}")
             return False
         
-    def run_multi_backtest(self, symbols, timeframes, exchange='binance'):
+    def run_multi_test(self, symbols, timeframes, exchange='binance'):
         """Run backtest across multiple symbols and timeframes"""
         self.logger.info(f"Running multi-symbol backtest for {len(symbols)} symbols and {len(timeframes)} timeframes")
         
@@ -713,7 +713,7 @@ class BacktestEngine:
             # Continue execution even if plotting fails
             return False
 
-    def run_backtest_on_test_set(self, exchange='binance', symbol='BTC/USDT', timeframe='1h'):
+    def run_test_on_test_set(self, exchange='binance', symbol='BTC/USDT', timeframe='1h'):
         """
         Run backtest strictly on test set data to ensure unbiased evaluation
         """

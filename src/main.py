@@ -114,28 +114,19 @@ def main():
             # Use the new training method with cross-validation
             model.train(exchange, symbols[0], timeframes[0])  # Train on a single symbol/timeframe
     elif args.mode == 'backtest':
-        # Choose between regular backtesting or walk-forward testing
+        # Create the appropriate tester based on command-line arguments
         if args.walk_forward:
-            # Use walk-forward testing
-            walk_forward_tester = WalkForwardTester(config)
-            
-            # Check if backtesting on multiple symbols/timeframes
-            if len(symbols) > 1 or len(timeframes) > 1:
-                logger.info(f"Walk-forward testing on multiple symbols/timeframes: {symbols} {timeframes}")  # Log the backtesting details
-                walk_forward_tester.run_multi_walk_forward_test(symbols, timeframes, exchange)  # Run backtest on multiple symbols/timeframes
-            else:
-                logger.info(f"Walk-forward testing on {symbols[0]} {timeframes[0]}")
-                walk_forward_tester.run_walk_forward_test(exchange, symbols[0], timeframes[0])  # Run backtest on a single symbol/timeframe
+            tester = WalkForwardTester(config)
         else:
-            # Use standard backtesting
-            backtest_engine = BacktestEngine(config)  # Initialize the backtest engine
-            
-            if len(symbols) > 1 or len(timeframes) > 1:
-                logger.info(f"Backtesting on multiple symbols/timeframes: {symbols} {timeframes}")
-                backtest_engine.run_multi_backtest(symbols, timeframes, exchange)
-            else:
-                logger.info(f"Backtesting on {symbols[0]} {timeframes[0]}")
-                backtest_engine.run_backtest(exchange, symbols[0], timeframes[0])
+            tester = BacktestEngine(config)
+        
+        # Check if backtesting on multiple symbols/timeframes
+        if len(symbols) > 1 or len(timeframes) > 1:
+            logger.info(f"Testing on multiple symbols/timeframes: {symbols} {timeframes}")  # Log the backtesting details
+            tester.run_multi_test(symbols, timeframes, exchange) # Run backtest on multiple symbols/timeframes
+        else:
+            logger.info(f"Testing on {symbols[0]} {timeframes[0]}")
+            tester.run_test(exchange, symbols[0], timeframes[0])# Run backtest on a single symbol/timeframe
     elif args.mode == 'paper':
         logger.info("Paper trading mode not yet implemented")  # Log that paper trading is not implemented
     elif args.mode == 'live':
