@@ -5,124 +5,143 @@
 Main entry point for the trading bot application.
 """
 
-import argparse
-import logging
-import sys
-import yaml
-from pathlib import Path
+import argparse  # For parsing command-line arguments
+import logging  # For logging messages
+import sys  # For system-specific parameters and functions
+import yaml  # For parsing YAML configuration files
+from pathlib import Path  # For handling file system paths
 
+# Importing necessary modules from the project
 from src.data.data_collector import DataCollector
 from src.features.feature_engineering import FeatureEngineer
 from src.models.model_factory import ModelFactory
 from src.backtesting.backtest_engine import BacktestEngine
+from src.backtesting.walk_forward_tester import WalkForwardTester
 
 def setup_logging():
     """Configure logging settings"""
     logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        level=logging.INFO, # Set the logging level to INFO
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', # Define the log message format
         handlers=[
-            logging.FileHandler("logs/trading_bot.log"),
-            logging.StreamHandler(sys.stdout)
+            logging.FileHandler("logs/trading_bot.log"),  # Log messages to a file
+            logging.StreamHandler(sys.stdout)  # Also log messages to the console
         ]
     )
 
 def load_config(config_path):
     """Load configuration from YAML file"""
     with open(config_path, 'r') as file:
-        return yaml.safe_load(file)
+        return yaml.safe_load(file) # Parse the YAML file and return the configuration as a dictionary
 
 def main():
     """Main function to run the trading bot"""
     parser = argparse.ArgumentParser(description='Cryptocurrency Trading Bot')
     parser.add_argument('--config', type=str, default='config/config.yaml',
-                        help='Path to configuration file')
+                        help='Path to configuration file')  # Argument for specifying the config file path
     parser.add_argument('--mode', type=str, 
                         choices=['collect', 'train', 'backtest', 'paper', 'live'],
-                        default='collect', help='Operation mode')
+                        default='collect', help='Operation mode')  # Argument for specifying the operation mode
     parser.add_argument('--symbols', type=str, nargs='+',
-                        help='Specific symbols to process (e.g., BTC/USD ETH/USD)')
+                        help='Specific symbols to process (e.g., BTC/USD ETH/USDT)')  # Argument for specifying symbols
     parser.add_argument('--timeframes', type=str, nargs='+',
-                        help='Specific timeframes to process (e.g., 1h 4h 1d)')
+                        help='Specific timeframes to process (e.g., 1h 4h 1d)')  # Argument for specifying timeframes
     parser.add_argument('--exchange', type=str, default=None,
-                        help='Specific exchange to use (default: first exchange in config)')
+                        help='Specific exchange to use (default: first exchange in config)')  # Argument for specifying exchange
     parser.add_argument('--template', type=str,
-                        help='Use a predefined template (e.g., crypto_majors, altcoins)')
-    args = parser.parse_args()
+                        help='Use a predefined template (e.g., crypto_majors, altcoins)')  # Argument for specifying a template
+    parser.add_argument('--walk-forward', action='store_true',
+                        help='Use walk-forward testing instead of standard backtesting') # Argument for enabling walk-forward testing
+    args = parser.parse_args()  # Parse the command-line arguments
     
     # Setup logging
     setup_logging()
-    logger = logging.getLogger(__name__)
-    logger.info(f"Starting trading bot in {args.mode} mode")
+    logger = logging.getLogger(__name__)  # Create a logger for this module
+    logger.info(f"Starting trading bot in {args.mode} mode")  # Log the starting mode
     
     # Load configuration
-    config = load_config(args.config)
-    logger.info(f"Loaded configuration from {args.config}")
+    config = load_config(args.config)  # Load the configuration from the specified file
+    logger.info(f"Loaded configuration from {args.config}")  # Log the loaded configuration file
     
     # Override config with command-line arguments if provided
     if args.symbols:
-        config['data']['symbols'] = args.symbols
-        logger.info(f"Using symbols from command line: {args.symbols}")
+        config['data']['symbols'] = args.symbols  # Override symbols in the config
+        logger.info(f"Using symbols from command line: {args.symbols}")  # Log the overridden symbols
     
     if args.timeframes:
-        config['data']['timeframes'] = args.timeframes
-        logger.info(f"Using timeframes from command line: {args.timeframes}")
+        config['data']['timeframes'] = args.timeframes  # Override timeframes in the config
+        logger.info(f"Using timeframes from command line: {args.timeframes}")  # Log the overridden timeframes
     
     if args.exchange:
-        config['data']['exchanges'] = [args.exchange] + [e for e in config['data']['exchanges'] if e != args.exchange]
-        logger.info(f"Using exchange from command line: {args.exchange}")
+        config['data']['exchanges'] = [args.exchange] + [e for e in config['data']['exchanges'] if e != args.exchange]  # Override exchange in the config
+        logger.info(f"Using exchange from command line: {args.exchange}")  # Log the overridden exchange
         
     if args.template:
-        template_path = f"config/templates/{args.template}.yaml"
+        template_path = f"config/templates/{args.template}.yaml"  # Construct the template file path
         try:
             with open(template_path, 'r') as file:
-                template_config = yaml.safe_load(file)
+                template_config = yaml.safe_load(file)  # Load the template configuration
                 # Update only the data section
                 if 'data' in template_config:
-                    config['data'] = template_config['data']
-                logger.info(f"Loaded template from {template_path}")
+                    config['data'] = template_config['data']  # Override the data section in the config
+                logger.info(f"Loaded template from {template_path}")  # Log the loaded template
         except Exception as e:
-            logger.error(f"Error loading template {args.template}: {str(e)}")
+            logger.error(f"Error loading template {args.template}: {str(e)}")  # Log any errors in loading the template
     
     # Get symbols, timeframes and exchange for operations
-    symbols = config.get('data', {}).get('symbols', [])
-    timeframes = config.get('data', {}).get('timeframes', [])
-    exchange = config.get('data', {}).get('exchanges', ['binance'])[0]
+    symbols = config.get('data', {}).get('symbols', [])  # Get symbols from the config
+    timeframes = config.get('data', {}).get('timeframes', [])  # Get timeframes from the config
+    exchange = config.get('data', {}).get('exchanges', ['binance'])[0]  # Get the first exchange from the config
     
     # Execute based on mode
     if args.mode == 'collect':
-        collector = DataCollector(config)
-        collector.collect_data()
+        collector = DataCollector(config)  # Initialize the data collector
+        collector.collect_data()  # Collect data
     elif args.mode == 'train':
-        feature_engineer = FeatureEngineer(config)
-        feature_engineer.process_data()
+        feature_engineer = FeatureEngineer(config)  # Initialize the feature engineer
+        feature_engineer.process_data()  # Process data
         
-        model_factory = ModelFactory(config)
-        model = model_factory.create_model()
+        model_factory = ModelFactory(config)  # Initialize the model factory
+        model = model_factory.create_model()  # Create a model
         
         # Check if training on multiple symbols/timeframes
         if len(symbols) > 1 or len(timeframes) > 1:
-            logger.info(f"Training on multiple symbols/timeframes: {symbols} {timeframes}")
-            model.train_multi(symbols, timeframes, exchange)
+            logger.info(f"Training on multiple symbols/timeframes: {symbols} {timeframes}")  # Log the training details
+            # You'll need to adapt this method for the enhanced model
+            model.train_multi(symbols, timeframes, exchange)  # Train on multiple symbols/timeframes
         else:
-            logger.info(f"Training on {symbols[0]} {timeframes[0]}")
-            model.train(exchange, symbols[0], timeframes[0])
+            logger.info(f"Training on {symbols[0]} {timeframes[0]} with proper CV")
+            # Use the new training method with cross-validation
+            model.train(exchange, symbols[0], timeframes[0])  # Train on a single symbol/timeframe
     elif args.mode == 'backtest':
-        backtest_engine = BacktestEngine(config)
-        
-        # Check if backtesting on multiple symbols/timeframes
-        if len(symbols) > 1 or len(timeframes) > 1:
-            logger.info(f"Backtesting on multiple symbols/timeframes: {symbols} {timeframes}")
-            backtest_engine.run_multi_backtest(symbols, timeframes, exchange)
+        # Choose between regular backtesting or walk-forward testing
+        if args.walk_forward:
+            # Use walk-forward testing
+            walk_forward_tester = WalkForwardTester(config)
+            
+            # Check if backtesting on multiple symbols/timeframes
+            if len(symbols) > 1 or len(timeframes) > 1:
+                logger.info(f"Walk-forward testing on multiple symbols/timeframes: {symbols} {timeframes}")  # Log the backtesting details
+                walk_forward_tester.run_multi_walk_forward_test(symbols, timeframes, exchange)  # Run backtest on multiple symbols/timeframes
+            else:
+                logger.info(f"Walk-forward testing on {symbols[0]} {timeframes[0]}")
+                walk_forward_tester.run_walk_forward_test(exchange, symbols[0], timeframes[0])  # Run backtest on a single symbol/timeframe
         else:
-            logger.info(f"Backtesting on {symbols[0]} {timeframes[0]}")
-            backtest_engine.run_backtest(exchange, symbols[0], timeframes[0])
+            # Use standard backtesting
+            backtest_engine = BacktestEngine(config)  # Initialize the backtest engine
+            
+            if len(symbols) > 1 or len(timeframes) > 1:
+                logger.info(f"Backtesting on multiple symbols/timeframes: {symbols} {timeframes}")
+                backtest_engine.run_multi_backtest(symbols, timeframes, exchange)
+            else:
+                logger.info(f"Backtesting on {symbols[0]} {timeframes[0]}")
+                backtest_engine.run_backtest(exchange, symbols[0], timeframes[0])
     elif args.mode == 'paper':
-        logger.info("Paper trading mode not yet implemented")
+        logger.info("Paper trading mode not yet implemented")  # Log that paper trading is not implemented
     elif args.mode == 'live':
-        logger.info("Live trading mode not yet implemented")
+        logger.info("Live trading mode not yet implemented")  # Log that live trading is not implemented
     
-    logger.info("Trading bot finished execution")
+    logger.info("Trading bot finished execution")  # Log the end of execution
 
 if __name__ == "__main__":
-    main()
+    main()  # Run the main function if this script is executed directly

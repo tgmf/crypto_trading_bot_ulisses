@@ -5,48 +5,48 @@
 Data collection module for cryptocurrency markets.
 """
 
-import logging
-import os
-import time
-import pandas as pd
-import numpy as np
-import ccxt
-import requests
-import yfinance as yf
-from datetime import datetime, timedelta, date
-from pathlib import Path
+import logging  # For logging messages
+import os  # For interacting with the operating system
+import time  # For time-related functions
+import pandas as pd  # For data manipulation and analysis
+import numpy as np  # For numerical operations
+import ccxt  # For interacting with cryptocurrency exchanges
+import requests  # For making HTTP requests
+import yfinance as yf  # For fetching financial data from Yahoo Finance
+from datetime import datetime, timedelta, date  # For date and time manipulation
+from pathlib import Path  # For handling file system paths
 
 class DataCollector:
     """Collects historical and real-time data from cryptocurrency exchanges and alternative sources"""
     
     def __init__(self, config):
         """Initialize with configuration"""
-        self.config = config
-        self.logger = logging.getLogger(__name__)
-        self.exchanges = {}
-        self._initialize_exchanges()
+        self.config = config  # Store the configuration
+        self.logger = logging.getLogger(__name__)  # Create a logger for this class
+        self.exchanges = {}  # Dictionary to store exchange connections
+        self._initialize_exchanges()  # Initialize exchange connections
         
     def _initialize_exchanges(self):
         """Initialize exchange connections"""
-        exchange_configs = self.config.get('data', {}).get('exchanges', [])
+        exchange_configs = self.config.get('data', {}).get('exchanges', [])  # Get exchange configurations from the config
         
         for exchange_name in exchange_configs:
             try:
                 # Initialize without authentication for historical data
-                exchange_class = getattr(ccxt, exchange_name)
+                exchange_class = getattr(ccxt, exchange_name)  # Get the exchange class from ccxt
                 self.exchanges[exchange_name] = exchange_class({
-                    'enableRateLimit': True,
+                    'enableRateLimit': True,  # Enable rate limiting
                 })
-                self.logger.info(f"Initialized {exchange_name} connection")
+                self.logger.info(f"Initialized {exchange_name} connection")  # Log successful initialization
             except Exception as e:
-                self.logger.error(f"Failed to initialize {exchange_name}: {str(e)}")
+                self.logger.error(f"Failed to initialize {exchange_name}: {str(e)}")  # Log any errors during initialization
     
     def collect_data(self):
         """Collect historical data for configured symbols and timeframes"""
-        symbols = self.config.get('data', {}).get('symbols', [])
-        timeframes = self.config.get('data', {}).get('timeframes', [])
-        start_date = self.config.get('data', {}).get('start_date', '2020-01-01')
-        alt_sources = self.config.get('data', {}).get('alternative_sources', [])
+        symbols = self.config.get('data', {}).get('symbols', [])  # Get symbols from the config
+        timeframes = self.config.get('data', {}).get('timeframes', [])  # Get timeframes from the config
+        start_date = self.config.get('data', {}).get('start_date', '2020-01-01')  # Get start date from the config
+        alt_sources = self.config.get('data', {}).get('alternative_sources', [])  # Get alternative data sources from the config
         
         # Collect from exchanges
         self._collect_from_exchanges(symbols, timeframes, start_date)
@@ -97,7 +97,7 @@ class DataCollector:
                             if not candles or len(candles) == 0:
                                 break
                                 
-                            ohlcv.extend(candles)
+                            ohlcv.extend(candles)  # Append fetched data to the list
                             
                             # Update timestamp for next batch
                             current_since = candles[-1][0] + 1

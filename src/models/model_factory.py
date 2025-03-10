@@ -7,6 +7,7 @@ Factory for creating different trading models.
 
 import logging
 from .bayesian_model import BayesianModel
+from .enhanced_bayesian_model import EnhancedBayesianModel
 
 class ModelFactory:
     """Factory for creating trading models"""
@@ -27,6 +28,10 @@ class ModelFactory:
             self.logger.info("Quantum-inspired model not yet implemented")
             # Fall back to Bayesian for now
             return BayesianModel(self.config)
+        elif model_type == 'enhanced_bayesian':
+            self.logger.info("Creating Enhanced Bayesian model")
+            # Fall back to Bayesian for now
+            return EnhancedBayesianModel(self.config)
         else:
             self.logger.warning(f"Unknown model type: {model_type}, using Bayesian model")
             return BayesianModel(self.config)

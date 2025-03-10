@@ -40,8 +40,8 @@ class BayesianModel:
         """
         Create target variable for training:
         -1 = Short opportunity
-         0 = No trade
-         1 = Long opportunity
+        0 = No trade
+        1 = Long opportunity
         """
         n_samples = len(df)
         targets = np.zeros(n_samples)
@@ -106,38 +106,36 @@ class BayesianModel:
         self.logger.info(f"Training model for {exchange} {symbol} {timeframe}")
         
         try:
-            # Load processed data
+            # Load data
             symbol_safe = symbol.replace('/', '_')
             input_file = Path(f"data/processed/{exchange}/{symbol_safe}/{timeframe}.csv")
-            
-            if not input_file.exists():
-                self.logger.error(f"No processed data file found at {input_file}")
-                return False
-                
             df = pd.read_csv(input_file, index_col='timestamp', parse_dates=True)
             
             # Create target
             df['target'] = self.create_target(df)
             
-            # Use a subset of data for initial development (faster iterations)
-            train_size = min(len(df), 5000)  # Limit to 5000 samples for initial development
+            # Chronological split - use 70% for training, 30% for testing
+            train_size = int(len(df) * 0.7)
             train_df = df.iloc[:train_size]
+            test_df = df.iloc[train_size:]
+            
+            # Save test data for later evaluation
+            test_output_dir = Path(f"data/test_sets/{exchange}/{symbol_safe}")
+            test_output_dir.mkdir(parents=True, exist_ok=True)
+            test_df.to_csv(test_output_dir / f"{timeframe}_test.csv")
             
             # Prepare training data
             X_train = train_df[self.feature_cols].values
             y_train = train_df['target'].values
             
-            # Scale features
+            # Scale features (only fit on training data)
             X_train_scaled = self.scaler.fit_transform(X_train)
             
             # Build and train model
-            self.logger.info("Building Bayesian model...")
             self.build_model(X_train_scaled, y_train)
-            
-            # Save model
             self.save_model(exchange, symbol, timeframe)
             
-            return True
+            return train_df, test_df
             
         except Exception as e:
             self.logger.error(f"Error training model: {str(e)}")
@@ -227,6 +225,7 @@ class BayesianModel:
         
         return probs
     
+    # Prototyping the multi-symbol model (not ready for backtesting)
     def train_multi(self, symbols, timeframes, exchange='binance'):
         """Train the model on multiple symbols and timeframes"""
         self.logger.info(f"Training model on multiple symbols and timeframes")
