@@ -3,6 +3,13 @@
 
 """
 Bayesian model implementation for cryptocurrency trading.
+
+This module implements a Bayesian ordered logistic regression model for
+predicting trading signals. Key features include:
+- Three-state classification (short, neutral, long)
+- Fee-aware target creation
+- Proper train-test separation
+- Dataset reversal testing for model consistency
 """
 
 import logging
@@ -12,58 +19,85 @@ import pymc as pm
 import arviz as az
 from pathlib import Path
 from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import TimeSeriesSplit
 import pickle
 import json
 import matplotlib.pyplot as plt
 
 class BayesianModel:
-    """Bayesian model for trading signals"""
+    """
+    Bayesian model for trading signals using ordered logistic regression
+    
+    This model predicts the probability of profitable trading opportunities in
+    three states: short (-1), neutral (0), and long (1). It uses Bayesian inference
+    to quantify uncertainty and incorporates trading fees directly into the target
+    creation process.
+    """
     
     def __init__(self, config):
-        """Initialize with configuration"""
+        """
+        Initialize with configuration
+        
+        Args:
+            config (dict): Configuration dictionary containing model parameters,
+                        fee rates, and target thresholds
+        """
         self.config = config
         self.logger = logging.getLogger(__name__)
         self.model = None
         self.trace = None
         self.scaler = StandardScaler()
         
-        # Model parameters
+        # Extract model parameters from config
         self.fee_rate = self.config.get('backtesting', {}).get('fee_rate', 0.0006)
         self.min_profit = self.config.get('backtesting', {}).get('min_profit_target', 0.008)
         
-        # Feature columns to use
-        self.feature_cols = [
+        # Feature columns to use for prediction
+        self.feature_cols = self.config.get('model', {}).get('feature_cols', [
             'bb_pos', 'RSI_14', 'MACDh_12_26_9', 'trend_strength', 
             'volatility', 'volume_ratio', 'range', 'macd_hist_diff', 
             'rsi_diff', 'bb_squeeze'
-        ]
+        ])
     
     def create_target(self, df, forward_window=20):
         """
-        Create target variable for training:
-        -1 = Short opportunity
-        0 = No trade
-        1 = Long opportunity
+        Create target variable for training
+        
+        This method looks forward in time to identify profitable trading opportunities,
+        accounting for transaction fees. The target values are:
+        -1 = Short opportunity (profitable short trade)
+        0 = No trade opportunity (neither long nor short is profitable)
+        1 = Long opportunity (profitable long trade)
+        
+        Args:
+            df (DataFrame): Price data with OHLCV columns
+            forward_window (int): Number of periods to look ahead for profit opportunities
+            
+        Returns:
+            ndarray: Array of target values (-1, 0, or 1)
         """
         n_samples = len(df)
         targets = np.zeros(n_samples)
         
-        # Calculate total fee cost for round trip
+        # Calculate total fee cost for round trip (entry + exit)
         fee_cost = self.fee_rate * 2
         
+        # For each point in time, look forward to find profitable trades
         for i in range(n_samples - forward_window):
             entry_price = df['close'].iloc[i]
             future_prices = df['close'].iloc[i+1:i+forward_window+1].values
             
             # Calculate potential returns for long positions
+            # Formula: (exit_price / entry_price) - 1 - fees
             long_returns = future_prices / entry_price - 1 - fee_cost
             max_long_return = np.max(long_returns) if len(long_returns) > 0 else -np.inf
             
             # Calculate potential returns for short positions
+            # Formula: 1 - (exit_price / entry_price) - fees
             short_returns = 1 - (future_prices / entry_price) - fee_cost
             max_short_return = np.max(short_returns) if len(short_returns) > 0 else -np.inf
             
-            # Determine the trade direction with the highest potential return
+            # Determine the optimal trade direction based on maximum potential return
             if max_long_return >= self.min_profit and max_long_return > max_short_return:
                 targets[i] = 1  # Long opportunity
             elif max_short_return >= self.min_profit and max_short_return > max_long_return:
@@ -74,13 +108,28 @@ class BayesianModel:
         return targets
     
     def build_model(self, X_train, y_train):
-        """Build Bayesian model for three-state classification"""
-        # Adjust y_train to be 0, 1, 2 instead of -1, 0, 1
+        """
+        Build Bayesian ordered logistic regression model
+        
+        This method creates a Bayesian model with ordered logistic regression,
+        which is appropriate for categorical outcomes with a natural ordering
+        (short < neutral < long).
+        
+        Args:
+            X_train (ndarray): Feature matrix
+            y_train (ndarray): Target array with values -1, 0, 1
+            
+        Returns:
+            tuple: (model, trace) - PyMC model and sampling trace
+        """
+        # Adjust y_train to be 0, 1, 2 instead of -1, 0, 1 for ordered logistic
         y_train_adj = y_train + 1
         
+        # Check the unique classes in the adjusted target
         unique_classes = np.unique(y_train_adj)
         n_classes = len(unique_classes)
         
+        # Create PyMC model
         with pm.Model() as model:
             # Priors for unknown model parameters
             # For ordered logistic, we need n_classes-1 cutpoints
@@ -89,243 +138,101 @@ class BayesianModel:
             # Coefficients for each feature
             betas = pm.Normal("betas", mu=0, sigma=2, shape=X_train.shape[1])
             
-            # Expected values of latent variable
+            # Linear predictor - dot product of features and coefficients
             eta = pm.math.dot(X_train, betas)
             
-            # Ordered logistic regression
+            # Ordered logistic regression likelihood
             # NOTE: No need to add alpha to eta, as cutpoints handles that
             p = pm.OrderedLogistic("p", eta=eta, cutpoints=alpha, observed=y_train_adj)
             
-            # Sample from the posterior
+            # Sample from the posterior distribution
             trace = pm.sample(1000, tune=1000, chains=2, cores=1, return_inferencedata=True)
         
         self.model = model
         self.trace = trace
         return model, trace
     
-    def train(self, exchange='binance', symbol='BTC/USDT', timeframe='1m'):
-        """Train the model on processed data"""
-        self.logger.info(f"Training model for {exchange} {symbol} {timeframe}")
+    def train(self, exchange='binance', symbol='BTC/USDT', timeframe='1m', test_size=0.3):
+        """
+        Train the model on processed data with proper train-test split
+        
+        This implementation:
+        1. Loads the data
+        2. Creates chronological train-test split (last 30% for testing by default)
+        3. Creates target variables
+        4. Saves the test set separately
+        5. Trains the model on training data only
+        6. Saves the model
+        
+        Args:
+            exchange (str): Exchange name
+            symbol (str): Trading pair symbol
+            timeframe (str): Data timeframe
+            test_size (float): Proportion of data to use for testing (0.0-1.0)
+            
+        Returns:
+            tuple: (train_df, test_df) if successful, False otherwise
+        """
+        self.logger.info(f"Training model for {exchange} {symbol} {timeframe} with train-test split")
         
         try:
-            # Load data
+            # Load processed data
             symbol_safe = symbol.replace('/', '_')
             input_file = Path(f"data/processed/{exchange}/{symbol_safe}/{timeframe}.csv")
+            
+            if not input_file.exists():
+                self.logger.error(f"No processed data file found at {input_file}")
+                return False
+                
             df = pd.read_csv(input_file, index_col='timestamp', parse_dates=True)
             
-            # Create target
+            # Create target - must be done before splitting to avoid data leakage
+            # (target creation uses future data for each point)
+            self.logger.info("Creating target variables")
             df['target'] = self.create_target(df)
             
-            # Chronological split - use 70% for training, 30% for testing
-            train_size = int(len(df) * 0.7)
-            train_df = df.iloc[:train_size]
-            test_df = df.iloc[train_size:]
+            # Drop rows with NaN targets (occurs at the end due to forward window)
+            df = df.dropna(subset=['target'])
+            
+            # Chronological train-test split - using the last part for testing
+            train_size = int(len(df) * (1 - test_size))
+            train_df = df.iloc[:train_size].copy()
+            test_df = df.iloc[train_size:].copy()
+            
+            self.logger.info(f"Split data into training ({len(train_df)} samples) and test ({len(test_df)} samples)")
             
             # Save test data for later evaluation
             test_output_dir = Path(f"data/test_sets/{exchange}/{symbol_safe}")
             test_output_dir.mkdir(parents=True, exist_ok=True)
-            test_df.to_csv(test_output_dir / f"{timeframe}_test.csv")
+            
+            test_output_file = test_output_dir / f"{timeframe}_test.csv"
+            test_df.to_csv(test_output_file)
+            self.logger.info(f"Saved test set to {test_output_file}")
             
             # Prepare training data
             X_train = train_df[self.feature_cols].values
             y_train = train_df['target'].values
             
-            # Scale features (only fit on training data)
+            # Scale features (fit only on training data to avoid data leakage)
             X_train_scaled = self.scaler.fit_transform(X_train)
             
-            # Build and train model
+            # Build and train model on training data only
+            self.logger.info("Building Bayesian model...")
             self.build_model(X_train_scaled, y_train)
+            
+            # Save model
             self.save_model(exchange, symbol, timeframe)
             
             return train_df, test_df
             
         except Exception as e:
             self.logger.error(f"Error training model: {str(e)}")
+            import traceback
+            self.logger.error(traceback.format_exc())
             return False
-    
-    def save_model(self, exchange, symbol, timeframe):
-        """Save the trained model"""
-        try:
-            # Create directory
-            model_dir = Path("models")
-            model_dir.mkdir(exist_ok=True)
-            
-            # Save scaler
-            symbol_safe = symbol.replace('/', '_')
-            scaler_path = model_dir / f"{exchange}_{symbol_safe}_{timeframe}_scaler.pkl"
-            with open(scaler_path, 'wb') as f:
-                pickle.dump(self.scaler, f)
-            
-            # Save trace (posterior samples)
-            trace_path = model_dir / f"{exchange}_{symbol_safe}_{timeframe}_trace.netcdf"
-            az.to_netcdf(self.trace, trace_path)
-            
-            self.logger.info(f"Model saved to {model_dir}")
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Error saving model: {str(e)}")
-            return False
-    
-    def load_model(self, exchange, symbol, timeframe):
-        """Load a trained model"""
-        try:
-            # Create paths
-            model_dir = Path("models")
-            symbol_safe = symbol.replace('/', '_')
-            
-            scaler_path = model_dir / f"{exchange}_{symbol_safe}_{timeframe}_scaler.pkl"
-            trace_path = model_dir / f"{exchange}_{symbol_safe}_{timeframe}_trace.netcdf"
-            
-            # Load scaler
-            with open(scaler_path, 'rb') as f:
-                self.scaler = pickle.load(f)
-            
-            # Load trace
-            self.trace = az.from_netcdf(trace_path)
-            
-            self.logger.info(f"Model loaded from {model_dir}")
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Error loading model: {str(e)}")
-            return False
-    
-    def predict_probabilities(self, df):
-        """
-        Predict probabilities for each state:
-        P(short), P(no_trade), P(long)
-        
-        Returns a Nx3 array of probabilities
-        """
-        # Ensure we have the trace loaded
-        if self.trace is None:
-            self.logger.error("No model trace available. Load or train a model first.")
-            return None
-        
-        # Prepare features
-        X = df[self.feature_cols].values
-        X_scaled = self.scaler.transform(X)
-        
-        # Get parameter posteriors
-        alpha_post = self.trace.posterior["alpha"].mean(("chain", "draw")).values
-        betas_post = self.trace.posterior["betas"].mean(("chain", "draw")).values
-        
-        # Calculate linear predictor
-        eta = np.dot(X_scaled, betas_post)
-        
-        # Calculate ordered logit probabilities
-        probs = np.zeros((len(X), 3))
-        
-        # Use sigmoid to convert to probabilities
-        p0 = 1 / (1 + np.exp(-(alpha_post[0] - eta)))  # P(y <= 0)
-        p1 = 1 / (1 + np.exp(-(alpha_post[1] - eta)))  # P(y <= 1)
-        
-        probs[:, 0] = p0  # P(y=0) = P(y<=0)
-        probs[:, 1] = p1 - p0  # P(y=1) = P(y<=1) - P(y<=0)
-        probs[:, 2] = 1 - p1  # P(y=2) = 1 - P(y<=1)
-        
-        return probs
-    
-    # Prototyping the multi-symbol model (not ready for backtesting)
-    def train_multi(self, symbols, timeframes, exchange='binance'):
-        """Train the model on multiple symbols and timeframes"""
-        self.logger.info(f"Training model on multiple symbols and timeframes")
-        
-        # Lists to store all training data
-        all_X = []
-        all_y = []
-        
-        for symbol in symbols:
-            for timeframe in timeframes:
-                self.logger.info(f"Processing {symbol} {timeframe}")
-                
-                try:
-                    # Load processed data
-                    symbol_safe = symbol.replace('/', '_')
-                    input_file = Path(f"data/processed/{exchange}/{symbol_safe}/{timeframe}.csv")
-                    
-                    if not input_file.exists():
-                        self.logger.warning(f"No processed data file found at {input_file}")
-                        continue
-                        
-                    df = pd.read_csv(input_file, index_col='timestamp', parse_dates=True)
-                    
-                    # Create target
-                    df['target'] = self.create_target(df)
-                    
-                    # Prepare training data
-                    X = df[self.feature_cols].values
-                    y = df['target'].values
-                    
-                    # Append to combined datasets
-                    all_X.append(X)
-                    all_y.append(y)
-                    self.logger.info(f"Added {len(X)} rows from {symbol} {timeframe}")
-                    
-                except Exception as e:
-                    self.logger.error(f"Error processing {symbol} {timeframe}: {str(e)}")
-                    continue
-        
-        if not all_X:
-            self.logger.error("No data available for training")
-            return False
-        
-        # Combine all datasets
-        X_combined = np.vstack(all_X)
-        y_combined = np.concatenate(all_y)
-        
-        # Scale features
-        X_combined_scaled = self.scaler.fit_transform(X_combined)
-        
-        # Build and train model
-        self.logger.info(f"Building Bayesian model with {len(X_combined)} rows")
-        self.build_model(X_combined_scaled, y_combined)
-        
-        # Create a model name based on symbols and timeframes
-        model_name = self._generate_multi_model_name(symbols, timeframes)
-        
-        # Save model
-        self.save_model_multi(exchange, model_name)
-        
-        return True
 
-    def _generate_multi_model_name(self, symbols, timeframes):
-        """Generate a consistent name for multi-symbol models"""
-        symbols_str = "_".join([s.replace('/', '_') for s in symbols])
-        timeframes_str = "_".join(timeframes)
-        
-        # Truncate if too long
-        if len(symbols_str) > 40:
-            symbols_str = symbols_str[:37] + "..."
-            
-        return f"multi_{symbols_str}_{timeframes_str}"
-
-    def save_model_multi(self, exchange, model_name):
-        """Save the multi-symbol model"""
-        try:
-            # Create directory
-            model_dir = Path("models")
-            model_dir.mkdir(exist_ok=True)
-            
-            # Save scaler
-            scaler_path = model_dir / f"{exchange}_{model_name}_scaler.pkl"
-            with open(scaler_path, 'wb') as f:
-                pickle.dump(self.scaler, f)
-            
-            # Save trace (posterior samples)
-            trace_path = model_dir / f"{exchange}_{model_name}_trace.netcdf"
-            az.to_netcdf(self.trace, trace_path)
-            
-            self.logger.info(f"Multi-symbol model saved to {model_dir}")
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Error saving multi-symbol model: {str(e)}")
-            return False
-        
-    def train_with_cv(self, exchange='binance', symbol='BTC/USDT', timeframe='1h', 
-                test_size=0.2, n_splits=5, gap=0):
+    def train_with_cv(self, exchange='binance', symbol='BTC/USDT', timeframe='1m', 
+                        test_size=0.2, n_splits=5, gap=0):
         """
         Train with time-series cross-validation and proper test set separation
         
@@ -486,94 +393,8 @@ class BayesianModel:
             import traceback
             self.logger.error(traceback.format_exc())
             return False
-            
-    def _predict_class(self, X, trace):
-        """
-        Predict class from features using trace
         
-        Args:
-            X (ndarray): Feature matrix
-            trace: PyMC trace with posterior samples
-            
-        Returns:
-            ndarray: Class predictions (0, 1, or 2)
-        """
-        # Get parameter posteriors
-        alpha_post = trace.posterior["alpha"].mean(("chain", "draw")).values
-        betas_post = trace.posterior["betas"].mean(("chain", "draw")).values
-        
-        # Calculate linear predictor
-        eta = np.dot(X, betas_post)
-        
-        # Calculate ordered logit probabilities
-        probs = np.zeros((len(X), 3))
-        
-        # Use sigmoid to convert to probabilities
-        p0 = 1 / (1 + np.exp(-(alpha_post[0] - eta)))  # P(y <= 0)
-        p1 = 1 / (1 + np.exp(-(alpha_post[1] - eta)))  # P(y <= 1)
-        
-        probs[:, 0] = p0  # P(y=0) = P(y<=0)
-        probs[:, 1] = p1 - p0  # P(y=1) = P(y<=1) - P(y<=0)
-        probs[:, 2] = 1 - p1  # P(y=2) = 1 - P(y<=1)
-        
-        # Return most likely class
-        return np.argmax(probs, axis=1)
-        
-    def _plot_cv_results(self, cv_results, exchange, symbol, timeframe):
-        """
-        Plot cross-validation results
-        
-        Args:
-            cv_results (dict): Dictionary with cross-validation results
-            exchange (str): Exchange name
-            symbol (str): Trading pair symbol
-            timeframe (str): Data timeframe
-        """
-        try:
-            # Create directory for plots if it doesn't exist
-            symbol_safe = symbol.replace('/', '_')
-            output_dir = Path(f"models/{exchange}/{symbol_safe}")
-            output_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Create figure
-            plt.figure(figsize=(10, 6))
-            
-            # Plot train and validation accuracies
-            folds = cv_results['fold']
-            train_accs = cv_results['train_accuracy']
-            val_accs = cv_results['val_accuracy']
-            
-            plt.plot(folds, train_accs, 'o-', label='Training Accuracy')
-            plt.plot(folds, val_accs, 'o-', label='Validation Accuracy')
-            
-            # Add mean lines
-            avg_train = np.mean(train_accs)
-            avg_val = np.mean(val_accs)
-            
-            plt.axhline(avg_train, linestyle='--', color='blue', alpha=0.7, 
-                        label=f'Mean Train: {avg_train:.4f}')
-            plt.axhline(avg_val, linestyle='--', color='orange', alpha=0.7,
-                        label=f'Mean Val: {avg_val:.4f}')
-            
-            # Add labels and legends
-            plt.title(f'Time Series Cross-Validation - {symbol} {timeframe}')
-            plt.xlabel('Fold')
-            plt.ylabel('Accuracy')
-            plt.xticks(folds)
-            plt.legend()
-            plt.grid(True, alpha=0.3)
-            
-            # Save figure
-            plot_file = output_dir / f"cv_results_{timeframe}.png"
-            plt.savefig(plot_file)
-            plt.close()
-            
-            self.logger.info(f"Cross-validation plot saved to {plot_file}")
-            
-        except Exception as e:
-            self.logger.error(f"Error plotting CV results: {str(e)}")
-            
-    def train_with_reversed_datasets(self, exchange='binance', symbol='BTC/USDT', timeframe='1h', test_size=0.3):
+    def train_with_reversed_datasets(self, exchange='binance', symbol='BTC/USDT', timeframe='1m', test_size=0.3):
         """
         Train model with reversed datasets to test consistency and robustness
         
@@ -694,14 +515,14 @@ class BayesianModel:
             # Test original model on original test set
             X_orig_test = test_df[self.feature_cols].values
             X_orig_test_scaled = original_model.scaler.transform(X_orig_test)
-            orig_probs = original_model._predict_probs(X_orig_test_scaled)
+            orig_probs = original_model.predict_probabilities(X_orig_test_scaled)
             orig_preds = np.argmax(orig_probs, axis=1) - 1  # Convert back to -1, 0, 1
             orig_acc = np.mean(orig_preds == test_df['target'].values)
             
             # Test reversed model on original training set
             X_rev_test = train_df[self.feature_cols].values
             X_rev_test_scaled = self.scaler.transform(X_rev_test)
-            rev_probs = self._predict_probs(X_rev_test_scaled)
+            rev_probs = self.predict_probabilities(X_rev_test_scaled)
             rev_preds = np.argmax(rev_probs, axis=1) - 1  # Convert back to -1, 0, 1
             rev_acc = np.mean(rev_preds == train_df['target'].values)
             
@@ -721,8 +542,8 @@ class BayesianModel:
                 'reversed_accuracy': rev_acc,
                 'accuracy_difference': abs(orig_acc - rev_acc),
                 'feature_importance_correlation': rank_correlation,
-                'original_feature_importance': dict(zip(self.feature_cols, orig_importances)),
-                'reversed_feature_importance': dict(zip(self.feature_cols, rev_importances))
+                'original_feature_importance': dict(zip(self.feature_cols, orig_importances.tolist())),
+                'reversed_feature_importance': dict(zip(self.feature_cols, rev_importances.tolist()))
             }
             
             # Save comparison metrics
@@ -758,20 +579,167 @@ class BayesianModel:
             import traceback
             self.logger.error(traceback.format_exc())
             return False
-            
-    def _predict_probs(self, X):
+
+    def save_model(self, exchange, symbol, timeframe):
         """
-        Predict probabilities using the current model
+        Save the trained model
+        
+        Saves all components needed for prediction:
+        - Scaler for feature normalization
+        - Trace (posterior samples) from PyMC
+        - Feature column list
         
         Args:
-            X (ndarray): Feature matrix (scaled)
+            exchange (str): Exchange name
+            symbol (str): Trading pair symbol
+            timeframe (str): Data timeframe
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            # Create directory
+            model_dir = Path("models")
+            model_dir.mkdir(exist_ok=True)
+            
+            # Create safe path elements
+            symbol_safe = symbol.replace('/', '_')
+            
+            # Save scaler
+            scaler_path = model_dir / f"{exchange}_{symbol_safe}_{timeframe}_scaler.pkl"
+            with open(scaler_path, 'wb') as f:
+                pickle.dump(self.scaler, f)
+            
+            # Save trace (posterior samples)
+            trace_path = model_dir / f"{exchange}_{symbol_safe}_{timeframe}_trace.netcdf"
+            az.to_netcdf(self.trace, trace_path)
+            
+            # Save feature columns list
+            feat_cols_path = model_dir / f"{exchange}_{symbol_safe}_{timeframe}_feature_cols.pkl"
+            with open(feat_cols_path, 'wb') as f:
+                pickle.dump(self.feature_cols, f)
+            
+            self.logger.info(f"Model saved to {model_dir}")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Error saving model: {str(e)}")
+            return False
+    
+    def load_model(self, exchange, symbol, timeframe):
+        """
+        Load a trained model
+        
+        Loads all components needed for prediction:
+        - Scaler for feature normalization
+        - Trace (posterior samples) from PyMC
+        - Feature column list (if available)
+        
+        Args:
+            exchange (str): Exchange name
+            symbol (str): Trading pair symbol
+            timeframe (str): Data timeframe
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            # Create paths
+            model_dir = Path("models")
+            symbol_safe = symbol.replace('/', '_')
+            
+            scaler_path = model_dir / f"{exchange}_{symbol_safe}_{timeframe}_scaler.pkl"
+            trace_path = model_dir / f"{exchange}_{symbol_safe}_{timeframe}_trace.netcdf"
+            feat_cols_path = model_dir / f"{exchange}_{symbol_safe}_{timeframe}_feature_cols.pkl"
+
+            # Load scaler
+            with open(scaler_path, 'rb') as f:
+                self.scaler = pickle.load(f)
+            
+            # Load trace
+            self.trace = az.from_netcdf(trace_path)
+            
+            # Load feature columns if available
+            if feat_cols_path.exists():
+                with open(feat_cols_path, 'rb') as f:
+                    self.feature_cols = pickle.load(f)
+            
+            self.logger.info(f"Model loaded from {model_dir}")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Error loading model: {str(e)}")
+            return False
+    
+    def predict_probabilities(self, df_or_X):
+        """
+        Predict probabilities for each state
+        
+        This unified method can handle either DataFrames or pre-scaled feature arrays,
+        making it flexible for different use cases. It returns a probability array:
+        P(short), P(no_trade), P(long)
+        
+        Args:
+            df_or_X: Either a DataFrame with feature columns or a pre-scaled feature array
             
         Returns:
             ndarray: Probability array [P(short), P(no_trade), P(long)]
         """
-        # Get parameter posteriors
+        # Ensure we have the trace loaded
+        if self.trace is None:
+            self.logger.error("No model trace available. Load or train a model first.")
+            return None
+        
+        # Handle different input types
+        if isinstance(df_or_X, pd.DataFrame):
+            # Check for missing feature columns
+            missing_cols = [col for col in self.feature_cols if col not in df_or_X.columns]
+            if missing_cols:
+                self.logger.error(f"Missing feature columns in data: {missing_cols}")
+                return None
+            
+            # Extract features and scale
+            X = df_or_X[self.feature_cols].values
+            X_scaled = self.scaler.transform(X)
+        else:
+            # Assume input is already a properly scaled feature array
+            X_scaled = df_or_X
+        
+        # Get parameter posteriors from the Bayesian model
         alpha_post = self.trace.posterior["alpha"].mean(("chain", "draw")).values
         betas_post = self.trace.posterior["betas"].mean(("chain", "draw")).values
+        
+        # Calculate linear predictor (dot product of features and coefficients)
+        eta = np.dot(X_scaled, betas_post)
+        
+        # Calculate ordered logit probabilities
+        probs = np.zeros((len(X_scaled), 3))
+        
+        # Use sigmoid to convert to probabilities
+        p0 = 1 / (1 + np.exp(-(alpha_post[0] - eta)))  # P(y <= 0)
+        p1 = 1 / (1 + np.exp(-(alpha_post[1] - eta)))  # P(y <= 1)
+        
+        # Calculate probabilities for each class
+        probs[:, 0] = p0                # P(y=0) = P(y<=0)
+        probs[:, 1] = p1 - p0           # P(y=1) = P(y<=1) - P(y<=0)
+        probs[:, 2] = 1 - p1            # P(y=2) = 1 - P(y<=1)
+        
+        return probs
+
+    def _predict_class(self, X, trace):
+        """
+        Predict class from features using trace
+        
+        Args:
+            X (ndarray): Feature matrix (scaled)
+            trace: PyMC trace with posterior samples
+            
+        Returns:
+            ndarray: Class predictions (0, 1, or 2)
+        """
+        # Get parameter posteriors
+        alpha_post = trace.posterior["alpha"].mean(("chain", "draw")).values
+        betas_post = trace.posterior["betas"].mean(("chain", "draw")).values
         
         # Calculate linear predictor
         eta = np.dot(X, betas_post)
@@ -787,17 +755,88 @@ class BayesianModel:
         probs[:, 1] = p1 - p0  # P(y=1) = P(y<=1) - P(y<=0)
         probs[:, 2] = 1 - p1  # P(y=2) = 1 - P(y<=1)
         
-        return probs
-
+        # Return most likely class
+        return np.argmax(probs, axis=1)
+    
+    def _plot_cv_results(self, cv_results, exchange, symbol, timeframe):
+        """
+        Plot cross-validation results
+        
+        Creates a visualization showing training and validation accuracy
+        across different cross-validation folds, helping to diagnose
+        overfitting and model stability.
+        
+        Args:
+            cv_results (dict): Dictionary with cross-validation results
+            exchange (str): Exchange name
+            symbol (str): Trading pair symbol
+            timeframe (str): Data timeframe
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            # Create directory for plots if it doesn't exist
+            symbol_safe = symbol.replace('/', '_')
+            output_dir = Path(f"models/{exchange}/{symbol_safe}")
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Create figure
+            plt.figure(figsize=(10, 6))
+            
+            # Plot train and validation accuracies
+            folds = cv_results['fold']
+            train_accs = cv_results['train_accuracy']
+            val_accs = cv_results['val_accuracy']
+            
+            plt.plot(folds, train_accs, 'o-', label='Training Accuracy')
+            plt.plot(folds, val_accs, 'o-', label='Validation Accuracy')
+            
+            # Add mean lines
+            avg_train = np.mean(train_accs)
+            avg_val = np.mean(val_accs)
+            
+            plt.axhline(avg_train, linestyle='--', color='blue', alpha=0.7, 
+                        label=f'Mean Train: {avg_train:.4f}')
+            plt.axhline(avg_val, linestyle='--', color='orange', alpha=0.7,
+                        label=f'Mean Val: {avg_val:.4f}')
+            
+            # Add labels and legends
+            plt.title(f'Time Series Cross-Validation - {symbol} {timeframe}')
+            plt.xlabel('Fold')
+            plt.ylabel('Accuracy')
+            plt.xticks(folds)
+            plt.legend()
+            plt.grid(True, alpha=0.3)
+            
+            # Save figure
+            plot_file = output_dir / f"cv_results_{timeframe}.png"
+            plt.savefig(plot_file)
+            plt.close()
+            
+            self.logger.info(f"Cross-validation plot saved to {plot_file}")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Error plotting CV results: {str(e)}")
+            return False
+    
     def _plot_model_consistency(self, metrics, exchange, symbol, timeframe):
         """
         Create visualizations of model consistency metrics
+        
+        Creates plots comparing model performance and feature importance
+        between original and reversed training configurations, helping to
+        diagnose model robustness and potential overfitting.
         
         Args:
             metrics (dict): Dictionary with comparison metrics
             exchange (str): Exchange name
             symbol (str): Trading pair symbol
             timeframe (str): Data timeframe
+            
+        Returns:
+            bool: True if successful, False otherwise
         """
         try:
             # Create output directory
@@ -870,6 +909,154 @@ class BayesianModel:
             plt.close(fig)
             
             self.logger.info(f"Model consistency plot saved to {plot_file}")
+            return True
             
         except Exception as e:
             self.logger.error(f"Error plotting model consistency: {str(e)}")
+            return False
+    
+    def train_multi(self, symbols, timeframes, exchange='binance'):
+        """
+        Train the model on multiple symbols and timeframes
+        
+        This method trains a universal model that can be used across multiple
+        trading pairs and timeframes. This is useful for finding patterns that
+        generalize across different assets and time horizons.
+        
+        Args:
+            symbols (list): List of trading pair symbols
+            timeframes (list): List of timeframe strings
+            exchange (str): Exchange name
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        self.logger.info(f"Training model on multiple symbols and timeframes")
+        
+        # Lists to store all training data
+        all_X = []
+        all_y = []
+        
+        # Process each symbol and timeframe
+        for symbol in symbols:
+            for timeframe in timeframes:
+                self.logger.info(f"Processing {symbol} {timeframe}")
+                
+                try:
+                    # Load processed data
+                    symbol_safe = symbol.replace('/', '_')
+                    input_file = Path(f"data/processed/{exchange}/{symbol_safe}/{timeframe}.csv")
+                    
+                    if not input_file.exists():
+                        self.logger.warning(f"No processed data file found at {input_file}")
+                        continue
+                        
+                    df = pd.read_csv(input_file, index_col='timestamp', parse_dates=True)
+                    
+                    # Create target
+                    df['target'] = self.create_target(df)
+                    
+                    # Drop rows with NaN targets
+                    df = df.dropna(subset=['target'])
+                    
+                    # Extract features and target
+                    X = df[self.feature_cols].values
+                    y = df['target'].values
+                    
+                    # Append to combined datasets
+                    all_X.append(X)
+                    all_y.append(y)
+                    self.logger.info(f"Added {len(X)} rows from {symbol} {timeframe}")
+                    
+                except Exception as e:
+                    self.logger.error(f"Error processing {symbol} {timeframe}: {str(e)}")
+                    continue
+        
+        # Check if we have enough data
+        if not all_X:
+            self.logger.error("No data available for training")
+            return False
+        
+        # Combine all datasets
+        X_combined = np.vstack(all_X)
+        y_combined = np.concatenate(all_y)
+        
+        self.logger.info(f"Combined dataset has {len(X_combined)} samples")
+        
+        # Scale features
+        X_combined_scaled = self.scaler.fit_transform(X_combined)
+        
+        # Build and train model
+        self.logger.info(f"Building Bayesian model with {len(X_combined)} rows")
+        self.build_model(X_combined_scaled, y_combined)
+        
+        # Create a model name based on symbols and timeframes
+        model_name = self._generate_multi_model_name(symbols, timeframes)
+        
+        # Save model
+        self.save_model_multi(exchange, model_name)
+        
+        return True
+
+    def _generate_multi_model_name(self, symbols, timeframes):
+        """
+        Generate a consistent name for multi-symbol models
+        
+        Creates a standardized name for models trained on multiple symbols
+        and timeframes, which is used for file naming and identification.
+        
+        Args:
+            symbols (list): List of trading pair symbols
+            timeframes (list): List of timeframe strings
+            
+        Returns:
+            str: Generated model name
+        """
+        symbols_str = "_".join([s.replace('/', '_') for s in symbols])
+        timeframes_str = "_".join(timeframes)
+        
+        # Truncate if too long
+        if len(symbols_str) > 40:
+            symbols_str = symbols_str[:37] + "..."
+            
+        return f"multi_{symbols_str}_{timeframes_str}"
+
+    def save_model_multi(self, exchange, model_name):
+        """
+        Save the multi-symbol model
+        
+        Saves a model trained on multiple symbols and timeframes with
+        a special naming convention for identification.
+        
+        Args:
+            exchange (str): Exchange name
+            model_name (str): Generated model name
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            # Create directory
+            model_dir = Path("models")
+            model_dir.mkdir(exist_ok=True)
+            
+            # Save scaler
+            scaler_path = model_dir / f"{exchange}_{model_name}_scaler.pkl"
+            with open(scaler_path, 'wb') as f:
+                pickle.dump(self.scaler, f)
+            
+            # Save trace (posterior samples)
+            trace_path = model_dir / f"{exchange}_{model_name}_trace.netcdf"
+            az.to_netcdf(self.trace, trace_path)
+            
+            # Save feature columns list
+            feat_cols_path = model_dir / f"{exchange}_{model_name}_feature_cols.pkl"
+            with open(feat_cols_path, 'wb') as f:
+                pickle.dump(self.feature_cols, f)
+            
+            self.logger.info(f"Multi-symbol model saved to {model_dir}")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Error saving multi-symbol model: {str(e)}")
+            return False
