@@ -1,5 +1,3 @@
-That's an excellent suggestion! Testing model consistency through dataset reversal provides valuable insight into robustness. Let me add this to the README:
-
 # Cryptocurrency Trading Bot
 
 A machine learning powered cryptocurrency trading bot focused on quantum-inspired probabilistic decision making.
@@ -30,6 +28,7 @@ This project implements a sophisticated cryptocurrency trading system using Baye
 - **notebooks/** - Jupyter notebooks for exploration and analysis
 - **config/** - Configuration files
 - **models/** - Saved model artifacts
+  - **comparisons/** - Model consistency evaluation results
 - **logs/** - Application logs
 
 ## Setup and Installation
@@ -53,6 +52,7 @@ pip install -r requirements.txt
 # Create necessary directories
 mkdir -p data/test_sets
 mkdir -p data/walk_forward_results
+mkdir -p models/comparisons
 ```
 
 ### Docker Setup
