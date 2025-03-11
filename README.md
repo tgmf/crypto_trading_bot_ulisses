@@ -7,8 +7,6 @@ A cryptocurrency trading system using Bayesian and quantum-inspired probabilisti
 [![PyMC](https://img.shields.io/badge/PyMC-5.x-orange.svg)](https://www.pymc.io/)
 [![Contributions welcome](https://img.shields.io/badge/contributions-welcome-brightgreen.svg)](https://github.com/yourusername/quantumtrader/issues)
 
-![Trading System Architecture](https://via.placeholder.com/800x300?text=Trading+System+Architecture)
-
 ## 🌟 Features
 
 - **Quantum-Inspired Decision Making**: Treats positions as quantum states with superposition properties
@@ -239,5 +237,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## 🙏 Acknowledgements
 
 - PyMC community for Bayesian modeling support
-- The quantum computing community for inspiration
 - Contributors to the CCXT library for exchange connectivity
