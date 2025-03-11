@@ -42,6 +42,9 @@ def main():
     parser.add_argument('--mode', type=str, 
                         choices=['collect', 'train', 'backtest', 'paper', 'live'],
                         default='collect', help='Operation mode')  # Argument for specifying the operation mode
+    parser.add_argument('--model', type=str,
+                    choices=['bayesian', 'tf_bayesian', 'enhanced_bayesian', 'quantum'],
+                    help='Specify model type to use')  # Argument for specifying the model type
     parser.add_argument('--symbols', type=str, nargs='+',
                         help='Specific symbols to process (e.g., BTC/USD ETH/USDT)')  # Argument for specifying symbols
     parser.add_argument('--timeframes', type=str, nargs='+',
@@ -68,6 +71,12 @@ def main():
     logger.info(f"Loaded configuration from {args.config}")  # Log the loaded configuration file
     
     # Override config with command-line arguments if provided
+    if args.model:
+        if 'model' not in config:
+            config['model'] = {}
+        config['model']['type'] = args.model
+        logger.info(f"Using model type from command line: {args.model}")
+        
     if args.symbols:
         config['data']['symbols'] = args.symbols  # Override symbols in the config
         logger.info(f"Using symbols from command line: {args.symbols}")  # Log the overridden symbols

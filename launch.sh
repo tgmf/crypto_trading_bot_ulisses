@@ -25,9 +25,10 @@ show_help() {
   echo "  --cv                          - Use time-series cross-validation for training"
   echo "  --reverse                     - Train on test data and test on training data"
   echo "  --walk-forward                - Use walk-forward testing for backtesting"
+  echo "  --model bayesian|tf_bayesian|enhanced_bayesian  - Specify model type to use"
   echo ""
   echo "Examples:"
-  echo "  ./launch.sh train --timeframes '1h'"
+  echo "  ./launch.sh train --timeframes '1h' --model bayesian"
   echo "  ./launch.sh train --symbols 'ETH/USDT' --timeframes '1m' --cv"
   echo "  ./launch.sh train --symbols 'BTC/USD ETH/USDT' --timeframes '1d' --reverse"
   echo "  ./launch.sh backtest --symbols 'BTC/USD ETH/USD' --timeframes '1h 4h'"
@@ -47,7 +48,7 @@ shift 1
 OPTIONS=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --symbols|--timeframes|--exchange|--template)
+    --symbols|--timeframes|--exchange|--template|--model)
       OPTIONS="$OPTIONS $1 $2"
       shift 2
       ;;
