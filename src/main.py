@@ -52,6 +52,8 @@ def main():
                         help='Use a predefined template (e.g., crypto_majors, altcoins)')  # Argument for specifying a template
     parser.add_argument('--walk-forward', action='store_true',
                         help='Use walk-forward testing instead of standard backtesting') # Argument for enabling walk-forward testing
+    parser.add_argument('--cv', action='store_true',
+                    help='Use time-series cross-validation for training')  # Argument for enabling time-series cross-validation
     parser.add_argument('--reverse', action='store_true',
                         help='Train on test set and evaluate on training set (for model consistency testing)')  # Argument for enabling reverse testing
     args = parser.parse_args()  # Parse the command-line arguments
@@ -128,6 +130,59 @@ def main():
                 # Standard training with train-test split
                 logger.info(f"Training with standard train-test split for {symbols[0]} {timeframes[0]}")
                 model.train(exchange, symbols[0], timeframes[0])  # Train on a single symbol/timeframe
+    elif args.mode == 'continue-train':
+        # Load existing model
+        model_factory = ModelFactory(config)
+        model = model_factory.create_model()
+        
+        # Get symbols and timeframes from arguments
+        if len(symbols) != 1 or len(timeframes) != 1:
+            logger.error("Continue training mode requires exactly one symbol and one timeframe")
+            sys.exit(1)
+        
+        symbol = symbols[0]
+        timeframe = timeframes[0]
+        
+        # Try to load existing model
+        if not model.load_model(exchange, symbol, timeframe):
+            logger.error(f"No existing model found for {exchange} {symbol} {timeframe}")
+            sys.exit(1)
+        
+        logger.info(f"Successfully loaded existing model for {exchange} {symbol} {timeframe}")
+        
+        # Load new data
+        symbol_safe = symbol.replace('/', '_')
+        data_file = Path(f"data/processed/{exchange}/{symbol_safe}/{timeframe}.csv")
+        
+        if not data_file.exists():
+            logger.error(f"No processed data found at {data_file}")
+            sys.exit(1)
+        
+        # Load the data
+        df = pd.read_csv(data_file, index_col='timestamp', parse_dates=True)
+        logger.info(f"Loaded {len(df)} rows from {data_file}")
+        
+        # Check for test set to avoid training on it
+        test_file = Path(f"data/test_sets/{exchange}/{symbol_safe}/{timeframe}_test.csv")
+        if test_file.exists():
+            test_df = pd.read_csv(test_file, index_col='timestamp', parse_dates=True)
+            logger.info(f"Found test set with {len(test_df)} rows")
+            
+            # Remove test data from training data
+            df = df[~df.index.isin(test_df.index)]
+            logger.info(f"Removed test data, {len(df)} rows remaining for training")
+        
+        # Apply data sampling if dataset is too large
+        max_samples = 100000  # Adjust as needed
+        if len(df) > max_samples:
+            logger.info(f"Dataset too large, sampling {max_samples} rows")
+            df = df.sample(max_samples, random_state=42)
+        
+        # Continue training the model
+        logger.info(f"Continuing training for {exchange} {symbol} {timeframe} with {len(df)} samples")
+        model.continue_training(df, exchange, symbol, timeframe)
+        
+        logger.info("Model training continued successfully")
     elif args.mode == 'backtest':
         # Create the appropriate tester based on command-line arguments
         if args.walk_forward:

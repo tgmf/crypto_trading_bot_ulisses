@@ -72,6 +72,10 @@ case "$COMMAND" in
     echo "Training model..."
     python -m src.main --mode train $OPTIONS
     ;;
+  continue-train)
+    echo "Continuing training on new data..."
+    python -m src.main --mode continue-train $OPTIONS
+    ;;
   backtest)
     echo "Running backtest..."
     python -m src.main --mode backtest $OPTIONS

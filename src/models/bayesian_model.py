@@ -23,6 +23,9 @@ from sklearn.model_selection import TimeSeriesSplit
 import pickle
 import json
 import matplotlib.pyplot as plt
+# import pytensor
+
+# pytensor.config.mode = 'NUMBA'
 
 class BayesianModel:
     """
@@ -109,7 +112,7 @@ class BayesianModel:
     
     def build_model(self, X_train, y_train):
         """
-        Build Bayesian ordered logistic regression model
+        Build Bayesian ordered logistic regression model with GPU acceleration
         
         This method creates a Bayesian model with ordered logistic regression,
         which is appropriate for categorical outcomes with a natural ordering
@@ -129,6 +132,20 @@ class BayesianModel:
         unique_classes = np.unique(y_train_adj)
         n_classes = len(unique_classes)
         
+        # Check for JAX GPU support without requiring import if not available
+        try:
+            import jax
+            # Check if JAX can see GPUs
+            gpu_available = len(jax.devices('gpu')) > 0
+            if gpu_available:
+                from pymc.sampling.jax import sample_numpyro_nuts
+                self.logger.info("JAX GPU acceleration available. Using GPU for sampling.")
+            else:
+                self.logger.info("No GPU devices detected by JAX. Using CPU for sampling.")
+        except (ImportError, ModuleNotFoundError):
+            gpu_available = False
+            self.logger.info("JAX not available. Using CPU for sampling.")
+
         # Create PyMC model
         with pm.Model() as model:
             # Priors for unknown model parameters
@@ -145,8 +162,23 @@ class BayesianModel:
             # NOTE: No need to add alpha to eta, as cutpoints handles that
             p = pm.OrderedLogistic("p", eta=eta, cutpoints=alpha, observed=y_train_adj)
             
-            # Sample from the posterior distribution
-            trace = pm.sample(1000, tune=1000, chains=2, cores=1, return_inferencedata=True)
+            # Sample from the posterior distribution with GPU if available, otherwise use standard NUTS
+            if gpu_available:
+                trace = sample_numpyro_nuts(
+                    draws=1000,
+                    tune=1000, 
+                    chains=2,
+                    target_accept=0.85,
+                    random_seed=42
+                )
+            else:
+                trace = pm.sample(
+                    draws=1000, 
+                    tune=1000,
+                    chains=2, 
+                    cores=1, 
+                    return_inferencedata=True
+                )
         
         self.model = model
         self.trace = trace
@@ -915,7 +947,7 @@ class BayesianModel:
             self.logger.error(f"Error plotting model consistency: {str(e)}")
             return False
     
-    def train_multi(self, symbols, timeframes, exchange='binance'):
+    def train_multi(self, symbols, timeframes, exchange='binance', max_samples=500000):
         """
         Train the model on multiple symbols and timeframes
         
@@ -927,7 +959,8 @@ class BayesianModel:
             symbols (list): List of trading pair symbols
             timeframes (list): List of timeframe strings
             exchange (str): Exchange name
-            
+            max_samples (int): Maximum number of samples to use for training
+                
         Returns:
             bool: True if successful, False otherwise
         """
@@ -936,6 +969,9 @@ class BayesianModel:
         # Lists to store all training data
         all_X = []
         all_y = []
+        
+        # Calculate maximum samples per source to stay within memory limits
+        max_rows_per_source = max_samples // (len(symbols) * len(timeframes))
         
         # Process each symbol and timeframe
         for symbol in symbols:
@@ -959,6 +995,36 @@ class BayesianModel:
                     # Drop rows with NaN targets
                     df = df.dropna(subset=['target'])
                     
+                    # Sample data if it exceeds the per-source limit
+                    if len(df) > max_rows_per_source:
+                        self.logger.info(f"Dataset too large, sampling {max_rows_per_source} rows from {symbol} {timeframe}")
+                        
+                        # Stratified sampling to maintain class distribution
+                        y_values = df['target'].values
+                        unique_classes, counts = np.unique(y_values, return_counts=True)
+                        min_class_count = np.min(counts)
+                        
+                        # Calculate samples per class to maintain balance
+                        samples_per_class = min(min_class_count, max_rows_per_source // len(unique_classes))
+                        
+                        # Get indices for each class
+                        sampled_indices = []
+                        for cls in unique_classes:
+                            cls_indices = df.index[df['target'] == cls]
+                            if len(cls_indices) > samples_per_class:
+                                sampled_cls_indices = np.random.choice(
+                                    cls_indices, 
+                                    size=samples_per_class, 
+                                    replace=False
+                                )
+                                sampled_indices.extend(sampled_cls_indices)
+                            else:
+                                # If we don't have enough samples of this class, take all of them
+                                sampled_indices.extend(cls_indices)
+                        
+                        # Sample the dataframe
+                        df = df.loc[sampled_indices]
+                    
                     # Extract features and target
                     X = df[self.feature_cols].values
                     y = df['target'].values
@@ -970,7 +1036,19 @@ class BayesianModel:
                     
                 except Exception as e:
                     self.logger.error(f"Error processing {symbol} {timeframe}: {str(e)}")
+                    import traceback
+                    self.logger.error(traceback.format_exc())
                     continue
+            
+            # Periodically check memory usage
+            try:
+                import psutil
+                process = psutil.Process()
+                memory_info = process.memory_info()
+                memory_gb = memory_info.rss / (1024 * 1024 * 1024)  # Convert to GB
+                self.logger.info(f"Current memory usage: {memory_gb:.2f} GB")
+            except ImportError:
+                pass
         
         # Check if we have enough data
         if not all_X:
@@ -983,11 +1061,38 @@ class BayesianModel:
         
         self.logger.info(f"Combined dataset has {len(X_combined)} samples")
         
+        # Apply final sampling if needed to ensure we stay within memory limits
+        if len(X_combined) > max_samples:
+            self.logger.info(f"Combined dataset too large, sampling {max_samples} rows")
+            # Random sampling for the final dataset
+            indices = np.random.choice(len(X_combined), size=max_samples, replace=False)
+            X_combined = X_combined[indices]
+            y_combined = y_combined[indices]
+            self.logger.info(f"Final dataset has {len(X_combined)} samples after sampling")
+        
         # Scale features
         X_combined_scaled = self.scaler.fit_transform(X_combined)
         
         # Build and train model
         self.logger.info(f"Building Bayesian model with {len(X_combined)} rows")
+        
+        try:
+            self.build_model(X_combined_scaled, y_combined)
+            
+            # Create a model name based on symbols and timeframes
+            model_name = self._generate_multi_model_name(symbols, timeframes)
+            
+            # Save model
+            self.save_model_multi(exchange, model_name)
+            
+            self.logger.info(f"Multi-symbol model trained and saved successfully")
+            return True
+        except Exception as e:
+            self.logger.error(f"Error training model: {str(e)}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            return False
+            
         self.build_model(X_combined_scaled, y_combined)
         
         # Create a model name based on symbols and timeframes
@@ -1060,3 +1165,124 @@ class BayesianModel:
         except Exception as e:
             self.logger.error(f"Error saving multi-symbol model: {str(e)}")
             return False
+        
+    def continue_training(self, new_data_df, exchange='binance', symbol='BTC/USDT', timeframe='1h'):
+        """Continue training an existing model with new data"""
+        self.logger.info(f"Continuing training for {exchange} {symbol} {timeframe}")
+        
+        # Check if a model exists
+        if self.trace is None:
+            self.logger.error("No existing model found. Please train a model first.")
+            return False
+        
+        try:
+            # Process new data
+            X_new = new_data_df[self.feature_cols].values
+            new_data_df['target'] = self.create_target(new_data_df)
+            y_new = new_data_df['target'].values
+            
+            # Scale new data using existing scaler
+            X_new_scaled = self.scaler.transform(X_new)
+            
+            # Get current posterior means for parameters
+            alpha_mean = self.trace.posterior["alpha"].mean(("chain", "draw")).values
+            betas_mean = self.trace.posterior["betas"].mean(("chain", "draw")).values
+            
+            # Get standard deviations for uncertainty
+            alpha_std = self.trace.posterior["alpha"].std(("chain", "draw")).values
+            betas_std = self.trace.posterior["betas"].std(("chain", "draw")).values
+            
+            # Adjust y for ordered logistic
+            y_new_adj = y_new + 1
+            
+            # Create new model with informed priors
+            with pm.Model() as new_model:
+                # Use previous posterior as new prior
+                alpha = pm.Normal("alpha", mu=alpha_mean, sigma=alpha_std, shape=2)
+                betas = pm.Normal("betas", mu=betas_mean, sigma=betas_std, shape=X_new_scaled.shape[1])
+                
+                # Linear predictor
+                eta = pm.math.dot(X_new_scaled, betas)
+                
+                # Ordered logistic regression
+                p = pm.OrderedLogistic("p", eta=eta, cutpoints=alpha, observed=y_new_adj)
+                
+                # Sample
+                new_trace = pm.sample(1000, tune=1000, chains=2, cores=1, return_inferencedata=True)
+            
+            # Update the model
+            self.model = new_model
+            self.trace = new_trace
+            
+            # Save updated model
+            self.save_model(exchange, symbol, timeframe)
+            
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Error continuing training: {str(e)}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            return False
+        
+    def train_with_reservoir(self, new_data_df, max_samples=10000, exchange='binance', symbol='BTC/USDT', timeframe='1h'):
+        """Train model using reservoir sampling to maintain a representative dataset"""
+        
+        # Check if we already have a reservoir
+        reservoir_path = Path(f"data/reservoir/{exchange}/{symbol.replace('/', '_')}/{timeframe}.csv")
+        
+        if reservoir_path.exists():
+            # Load existing reservoir
+            reservoir_df = pd.read_csv(reservoir_path, index_col='timestamp', parse_dates=True)
+            self.logger.info(f"Loaded existing reservoir with {len(reservoir_df)} samples")
+        else:
+            # Create new reservoir
+            reservoir_df = pd.DataFrame()
+            reservoir_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Add new data using reservoir sampling
+        if len(reservoir_df) < max_samples:
+            # Reservoir not full yet, just append
+            reservoir_df = pd.concat([reservoir_df, new_data_df])
+            if len(reservoir_df) > max_samples:
+                # If we exceeded max_samples, randomly sample
+                reservoir_df = reservoir_df.sample(max_samples)
+        else:
+            # Reservoir full, randomly replace elements
+            for i, row in new_data_df.iterrows():
+                if np.random.random() < len(new_data_df) / (len(reservoir_df) + i):
+                    # Replace a random element
+                    replace_idx = np.random.randint(0, len(reservoir_df))
+                    reservoir_df.iloc[replace_idx] = row
+        
+        # Save updated reservoir
+        reservoir_df.to_csv(reservoir_path)
+        self.logger.info(f"Updated reservoir with {len(reservoir_df)} samples")
+        
+        # Train on the reservoir
+        return self.train(exchange, symbol, timeframe, reservoir_df=reservoir_df)
+    
+    def train_with_time_weighting(self, all_data_df, exchange='binance', symbol='BTC/USDT', timeframe='1h', recency_weight=2.0):
+        """Train with time-weighted sampling (newer data gets higher probability)"""
+        
+        # Sort by time
+        all_data_df = all_data_df.sort_index()
+        
+        # Create time-based weights (newer data gets higher weight)
+        time_indices = np.arange(len(all_data_df))
+        weights = np.exp(recency_weight * time_indices / len(all_data_df))
+        weights = weights / weights.sum()  # Normalize
+        
+        # Sample with weights
+        sample_size = min(len(all_data_df), 50000)  # Adjust as needed
+        sampled_indices = np.random.choice(
+            len(all_data_df), 
+            size=sample_size, 
+            replace=False, 
+            p=weights
+        )
+        
+        sampled_df = all_data_df.iloc[sampled_indices]
+        
+        # Train on weighted sample
+        return self.train(exchange, symbol, timeframe, custom_df=sampled_df)

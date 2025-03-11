@@ -1,73 +1,80 @@
-# Cryptocurrency Trading Bot
+# QuantumTrader 🔄
 
-A machine learning powered cryptocurrency trading bot focused on quantum-inspired probabilistic decision making.
+A cryptocurrency trading system using Bayesian and quantum-inspired probabilistic decision making.
 
-## Overview
+[![Python 3.10](https://img.shields.io/badge/python-3.10-blue.svg)](https://www.python.org/downloads/release/python-3100/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![PyMC](https://img.shields.io/badge/PyMC-5.x-orange.svg)](https://www.pymc.io/)
+[![Contributions welcome](https://img.shields.io/badge/contributions-welcome-brightgreen.svg)](https://github.com/yourusername/quantumtrader/issues)
 
-This project implements a sophisticated cryptocurrency trading system using Bayesian and quantum-inspired models to make probabilistic trading decisions. The system is designed with a focus on:
+![Trading System Architecture](https://via.placeholder.com/800x300?text=Trading+System+Architecture)
 
-- Fee-aware model training and evaluation
-- Probabilistic three-state decision making (long, short, no trade)
-- Comprehensive risk management
-- Proper train-test separation for reliable performance evaluation
+## 🌟 Features
 
-## Project Structure
+- **Quantum-Inspired Decision Making**: Treats positions as quantum states with superposition properties
+- **Fee-Aware Training**: Incorporates transaction costs directly into model objectives
+- **Bayesian Probabilistic Modeling**: Quantifies uncertainty in trading decisions
+- **Advanced Backtesting Framework**: Multiple validation approaches to ensure robust performance
+- **GPU Acceleration**: CUDA support for faster model training and inference
+- **Comprehensive Risk Management**: Dynamic position sizing and market regime detection
 
-- **data/** - Data storage
-  - **raw/** - Original data from exchanges
-  - **processed/** - Feature-engineered data
-  - **test_sets/** - Reserved test data for unbiased evaluation
-  - **backtest_results/** - Backtest outputs and metrics
-  - **walk_forward_results/** - Walk-forward testing results
-- **src/** - Source code
-  - **data/** - Data collection and management
-  - **features/** - Feature engineering
-  - **models/** - Trading models and algorithms
-  - **backtesting/** - Backtesting framework
-  - **visualization/** - Visualization tools
-- **notebooks/** - Jupyter notebooks for exploration and analysis
-- **config/** - Configuration files
-- **models/** - Saved model artifacts
-  - **comparisons/** - Model consistency evaluation results
-- **logs/** - Application logs
+## 📊 Trading Model Architecture
 
-## Setup and Installation
+The system uses a unique three-state quantum-inspired approach:
+
+- **Short (-1)**: Betting on price decrease
+- **Neutral (0)**: No clear edge detected
+- **Long (1)**: Betting on price increase
+
+Unlike traditional binary classification models, our approach:
+- Outputs continuous probability distributions across all states
+- Supports partial position sizing based on prediction confidence
+- Allows for hedged positions when uncertainties are high
+- Directly incorporates fees into the objective function
+
+## 🛠️ Installation
 
 ### Prerequisites
 
-- Python 3.8+
-- Docker (optional)
-- WSL (if on Windows)
+- Python 3.10+
+- CUDA-compatible GPU (optional but recommended)
+- Conda package manager
 
-### Local Environment Setup
+### Local Installation
 
 ```bash
+# Clone the repository
+git clone https://github.com/yourusername/quantumtrader.git
+cd quantumtrader
+
 # Create conda environment
 conda create -n trading_env python=3.10 -y
 conda activate trading_env
 
-# Install dependencies
+# Install BLAS and core dependencies properly
+conda install -c conda-forge pymc numpy scipy mkl-service openblas numba
+
+# Install GPU acceleration (optional)
+pip install --upgrade "jax[cuda]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+
+# Install remaining dependencies
 pip install -r requirements.txt
 
 # Create necessary directories
-mkdir -p data/test_sets
-mkdir -p data/walk_forward_results
-mkdir -p models/comparisons
+mkdir -p data/test_sets data/walk_forward_results models/comparisons logs
 ```
 
-### Docker Setup
+### Docker Installation
 
 ```bash
 # Build Docker container
 docker-compose build
 
-# Start services defined in docker-compose.yml
+# Start services
 docker-compose up
 ```
 
-## Usage
-
-### Using Shell Script
+## 💻 Quick Start
 
 The project includes a convenience script for common operations:
 
@@ -76,132 +83,21 @@ The project includes a convenience script for common operations:
 ./launch.sh help
 
 # Collect historical data from exchanges
-./launch.sh collect
+./launch.sh collect --symbols "BTC/USDT" --timeframes "1h"
 
-# Train models with proper train-test split
-./launch.sh train
+# Train a model on the collected data
+./launch.sh train --symbols "BTC/USDT" --timeframes "1h"
 
-# Train models with time-series cross-validation
-./launch.sh train --cv
+# Run a backtest on the trained model
+./launch.sh backtest --symbols "BTC/USDT" --timeframes "1h"
 
-# Train with reversed datasets (test model stability)
-./launch.sh train --reverse
-
-# Run standard backtests
-./launch.sh backtest
-
-# Run walk-forward tests
-./launch.sh backtest --walk-forward
-
-# Launch Jupyter notebook for analysis
-./launch.sh notebook
+# Continue training an existing model with new data
+./launch.sh continue-train --symbols "BTC/USDT" --timeframes "1h"
 ```
 
-### Direct Python Usage
+## 📝 Configuration
 
-```bash
-# Activate environment first
-conda activate trading_env
-
-# Data Collection
-python src/main.py --mode collect --symbols BTC/USDT ETH/USDT --timeframes 1h 4h
-
-# Model Training (with train-test split)
-python src/main.py --mode train --symbols BTC/USDT --timeframes 1h
-
-# Model Training (with cross-validation)
-python src/main.py --mode train --symbols BTC/USDT --timeframes 1h --cv
-
-# Reverse Train-Test (for model consistency checking)
-python src/main.py --mode train --symbols BTC/USDT --timeframes 1h --reverse
-
-# Standard Backtesting
-python src/main.py --mode backtest --symbols BTC/USDT --timeframes 1h
-
-# Walk-Forward Testing
-python src/main.py --mode backtest --symbols BTC/USDT --timeframes 1h --walk-forward
-
-# Multi-Symbol Testing
-python src/main.py --mode backtest --symbols BTC/USDT ETH/USDT --timeframes 1h 4h
-```
-
-## Testing Approaches
-
-The system supports multiple testing approaches, each with different strengths:
-
-### Standard Backtesting
-- **Use when**: Quickly evaluating a model on historical data
-- **Features**: Automatically uses test data when available
-- **Command**: `python src/main.py --mode backtest`
-
-### Walk-Forward Testing
-- **Use when**: Evaluating how a model performs with periodic retraining
-- **Features**: Simulates real-world model deployment with periodic retraining
-- **Command**: `python src/main.py --mode backtest --walk-forward`
-
-### Reversed Dataset Testing
-- **Use when**: Validating model consistency and robustness
-- **Features**: Trains on original test set and tests on original training set
-- **Benefits**: Helps detect model instability, dataset peculiarities, or overfitting
-- **Command**: `python src/main.py --mode train --reverse`
-
-All approaches support testing on multiple symbols and timeframes to evaluate model robustness across different assets and time horizons.
-
-## Implementation Approach
-
-This project follows a step-by-step development approach:
-
-1. **Phase 1: Setup and Data Collection**
-   - Development environment configuration
-   - Data collection infrastructure
-   - Feature engineering framework
-
-2. **Phase 2: Model Development and Proper Evaluation**
-   - Bayesian model implementation with train-test separation
-   - Time-series cross-validation
-   - Walk-forward testing
-   - Dataset reversal validation
-
-3. **Phase 3: Advanced Model Development**
-   - Quantum-inspired model implementation
-   - Feature importance analysis
-   - Hyperparameter optimization
-
-4. **Phase 4: Advanced Strategy and Risk Management**
-   - Dynamic position sizing
-   - Enhanced risk management
-   - Market regime detection
-
-## Key Features
-
-### Bayesian Modeling
-
-The initial model uses Bayesian ordered logistic regression to generate probabilistic trade signals with explicit uncertainty quantification.
-
-### Quantum-Inspired Three-State Framework
-
-The advanced model treats trading decisions as a quantum-inspired three-state system:
-- Short (-1)
-- No position (0)
-- Long (1)
-
-Instead of forced classification, it outputs probabilities for each state, enabling sophisticated hedging strategies when uncertainty is high.
-
-### Fee-Aware Training
-
-All models are trained with explicit incorporation of trading fees, ensuring that signals only trigger when the expected profit exceeds transaction costs plus a minimum profit threshold.
-
-### Proper Model Evaluation
-
-The system enforces proper train-test separation to ensure reliable performance estimates:
-- Chronological data splitting (no random splitting)
-- Reserved test sets for final evaluation
-- Walk-forward testing for simulating real-world deployment
-- Dataset reversal testing for consistency validation
-
-## Configuration
-
-Key configuration options in `config/config.yaml`:
+Key settings in `config/config.yaml`:
 
 ```yaml
 # Data Collection Settings
@@ -215,29 +111,133 @@ backtesting:
   fee_rate: 0.0006  # Per-side fee rate
   min_profit_target: 0.008  # Minimum profit threshold
 
-# Walk-Forward Parameters
-walk_forward:
-  train_window: 180  # Training window in days
-  test_window: 30    # Testing window in days
-  step_size: 30      # Step size in days
+# Model Selection
+model:
+  type: "bayesian"  # Options: "bayesian", "enhanced_bayesian", "quantum"
 ```
 
-## Model Consistency Evaluation
+## 🔍 Testing Methodologies
 
-A truly robust trading model should demonstrate consistent performance regardless of the specific dataset used for training and testing. The dataset reversal testing:
+The system supports multiple evaluation approaches:
 
-1. Trains a model on what was originally designated as the test set
-2. Tests this model on what was originally used for training
-3. Compares performance metrics between the original and reversed approaches
+### Standard Backtesting
+```bash
+./launch.sh backtest --symbols "BTC/USDT" --timeframes "1h"
+```
+Best for quick strategy evaluation with automatic test set detection.
 
-This approach helps identify:
-- **Overfitting**: Large performance discrepancies between the two setups
-- **Data Peculiarities**: Special characteristics in either dataset
-- **Model Stability**: Consistency of feature importance rankings
-- **Regime Shifts**: Performance differences due to different market conditions
+### Walk-Forward Analysis
+```bash
+./launch.sh backtest --symbols "BTC/USDT" --timeframes "1h" --walk-forward
+```
+Simulates real-world model retraining for more realistic performance evaluation.
 
-A reliable model will show similar (not identical) performance characteristics in both arrangements, while an overfit or unstable model will show dramatic differences.
+### Reversed Dataset Testing
+```bash
+./launch.sh train --symbols "BTC/USDT" --timeframes "1h" --reverse
+```
+Validates model consistency by swapping train and test sets, detecting overfitting.
 
-## License
+### Multi-Symbol Validation
+```bash
+./launch.sh backtest --symbols "BTC/USDT ETH/USDT" --timeframes "1h 4h"
+```
+Tests model robustness across different assets and timeframes.
 
-MIT License
+## 📁 Project Structure
+
+```
+quantumtrader/
+├── config/               # Configuration files
+├── data/                 # Data storage
+│   ├── raw/              # Original data from exchanges
+│   ├── processed/        # Feature-engineered data
+│   ├── test_sets/        # Reserved test data
+│   └── backtest_results/ # Backtest outputs
+├── src/                  # Source code
+│   ├── data/             # Data collection modules
+│   ├── features/         # Feature engineering
+│   ├── models/           # Trading models
+│   ├── backtesting/      # Backtesting framework
+│   └── visualization/    # Visualization tools
+├── notebooks/            # Jupyter notebooks
+├── models/               # Saved model artifacts
+└── logs/                 # Application logs
+```
+
+## 📈 Performance Optimization
+
+### GPU Acceleration
+
+The system supports GPU acceleration for model training:
+
+```python
+# Uses JAX for GPU-accelerated sampling when available
+trace = sample_numpyro_nuts(
+    draws=1000,
+    tune=1000, 
+    chains=2,
+    target_accept=0.85
+)
+```
+
+### Memory Management
+
+For handling large datasets, smart sampling is implemented:
+
+```bash
+# Set maximum samples for training
+./launch.sh train --symbols "BTC/USDT" --timeframes "1m" --max-samples 100000
+```
+
+## 🔬 Advanced Usage
+
+### Model Selection
+
+Choose between different model implementations:
+
+```bash
+# Set in config.yaml or environment variable
+export MODEL_TYPE=enhanced_bayesian
+./launch.sh train --symbols "BTC/USDT" --timeframes "1h"
+```
+
+### Time-Series Cross-Validation
+
+Ensure robust model performance with proper validation:
+
+```bash
+./launch.sh train --symbols "BTC/USDT" --timeframes "1h" --cv
+```
+
+### Incremental Training
+
+Continue training an existing model with new data:
+
+```bash
+./launch.sh continue-train --symbols "BTC/USDT" --timeframes "1h"
+```
+
+## 📊 Visualization
+
+The system generates trading performance visualizations:
+
+- Equity curves comparing strategy vs buy-and-hold
+- Trade distribution analysis
+- Position duration statistics
+- Probability distribution evolution
+- Model consistency evaluation
+
+## 🤝 Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 🙏 Acknowledgements
+
+- PyMC community for Bayesian modeling support
+- The quantum computing community for inspiration
+- Contributors to the CCXT library for exchange connectivity

@@ -1,16 +1,11 @@
 # Data Collection Settings
 data:
+  model:
+    type: 'bayesian'
   timeframes:
     - 1m
-    - 5m
-    - 15m
-    - 1h
-    - 4h
   symbols:
-    - BTC/USD
-    - ETH/USD
     - BTC/USDT
-    - ETH/USDT
   start_date: 2011-01-01
   exchanges:
     - binance
