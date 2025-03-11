@@ -55,6 +55,12 @@ def main():
                         help='Use a predefined template (e.g., crypto_majors, altcoins)')  # Argument for specifying a template
     parser.add_argument('--walk-forward', action='store_true',
                         help='Use walk-forward testing instead of standard backtesting') # Argument for enabling walk-forward testing
+    parser.add_argument('--position-sizing', action='store_true',
+                        help='Use quantum-inspired position sizing for backtesting') # Argument for enabling quantum-inspired position sizing
+    parser.add_argument('--no-trade-threshold', type=float, default=0.96,
+                        help='Threshold for no-trade probability (default: 0.96)') # Argument for specifying the no-trade threshold
+    parser.add_argument('--min-position-change', type=float, default=0.05,
+                        help='Minimum position change to avoid fee churn (default: 0.05)') # Argument for specifying the minimum position change
     parser.add_argument('--cv', action='store_true',
                     help='Use time-series cross-validation for training')  # Argument for enabling time-series cross-validation
     parser.add_argument('--reverse', action='store_true',
@@ -199,13 +205,36 @@ def main():
         else:
             tester = BacktestEngine(config)
         
-        # Check if backtesting on multiple symbols/timeframes
-        if len(symbols) > 1 or len(timeframes) > 1:
-            logger.info(f"Testing on multiple symbols/timeframes: {symbols} {timeframes}")  # Log the backtesting details
-            tester.run_multi_test(symbols, timeframes, exchange) # Run backtest on multiple symbols/timeframes
+        if args.position_sizing:
+            logger.info(f"Using quantum-inspired position sizing with no_trade_threshold={args.no_trade_threshold}")  # Log the testing details
+            
+            # Check if backtesting on multiple symbols/timeframes
+            if len(symbols) > 1 or len(timeframes) > 1:
+                logger.info(f"Testing on multiple symbols/timeframes: {symbols} {timeframes}")
+                tester.run_multi_position_sizing_test(
+                    symbols, 
+                    timeframes, 
+                    exchange,
+                    no_trade_threshold=args.no_trade_threshold,
+                    min_position_change=args.min_position_change
+                ) # Run position sizing test on multiple symbols/timeframes
+            else:
+                logger.info(f"Testing on {symbols[0]} {timeframes[0]}")
+                tester.run_position_sizing_test(
+                    exchange, 
+                    symbols[0], 
+                    timeframes[0],
+                    no_trade_threshold=args.no_trade_threshold,
+                    min_position_change=args.min_position_change
+                ) # Run position sizing test on a single symbol/timeframe
         else:
-            logger.info(f"Testing on {symbols[0]} {timeframes[0]}")
-            tester.run_test(exchange, symbols[0], timeframes[0])# Run backtest on a single symbol/timeframe
+            # Original backtesting without position sizing
+            if len(symbols) > 1 or len(timeframes) > 1: # Check if backtesting on multiple symbols/timeframes
+                logger.info(f"Testing on multiple symbols/timeframes: {symbols} {timeframes}")
+                tester.run_multi_test(symbols, timeframes, exchange) # Run test on multiple symbols/timeframes
+            else:
+                logger.info(f"Testing on {symbols[0]} {timeframes[0]}")
+                tester.run_test(exchange, symbols[0], timeframes[0]) # Run test on a single symbol/timeframe
     elif args.mode == 'paper':
         logger.info("Paper trading mode not yet implemented")  # Log that paper trading is not implemented
     elif args.mode == 'live':

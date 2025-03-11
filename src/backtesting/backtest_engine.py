@@ -24,6 +24,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 from datetime import datetime
+import json
 
 from ..models.model_factory import ModelFactory
 
@@ -767,4 +768,317 @@ class BacktestEngine:
             
         except Exception as e:
             self.logger.error(f"Error during test set backtesting: {str(e)}")
+            return False
+        
+    def run_position_sizing_test(self, exchange='binance', symbol='BTC/USDT', timeframe='1h', 
+                                    no_trade_threshold=0.96, min_position_change=0.05):
+        """
+        Run a backtest with quantum position sizing instead of traditional binary signals.
+        
+        This method:
+        1. Loads the appropriate test set or falls back to processed data
+        2. Gets probability predictions from the model
+        3. Applies quantum-inspired position sizing 
+        4. Evaluates and visualizes performance
+        
+        Args:
+            exchange (str): Exchange name
+            symbol (str): Trading pair symbol
+            timeframe (str): Data timeframe
+            no_trade_threshold (float): Threshold for no_trade probability to ignore signals
+            min_position_change (float): Minimum position change to avoid fee churn
+                
+        Returns:
+            tuple or bool: (backtest_results, metrics, fig) if successful, False otherwise
+        """
+        self.logger.info(f"Running position sizing test for {exchange} {symbol} {timeframe}")
+        
+        try:
+            # Check for test data first
+            symbol_safe = symbol.replace('/', '_')
+            test_file = Path(f"data/test_sets/{exchange}/{symbol_safe}/{timeframe}_test.csv")
+            
+            # If test data exists, use it (preferred for proper evaluation)
+            if test_file.exists():
+                self.logger.info(f"Using held-out test data from {test_file}")
+                df = pd.read_csv(test_file, index_col='timestamp', parse_dates=True)
+                data_source = "test_set"  # Track the data source
+            else:
+                # Fall back to processed data with a warning
+                self.logger.warning(f"No test set found. Using processed data instead. "
+                        f"This may lead to overoptimistic results due to possible data leakage.")
+                
+                input_file = Path(f"data/processed/{exchange}/{symbol_safe}/{timeframe}.csv")
+                
+                if not input_file.exists():
+                    self.logger.error(f"No processed data file found at {input_file}")
+                    return False
+                    
+                df = pd.read_csv(input_file, index_col='timestamp', parse_dates=True)
+                data_source = "full_data"  # Track the data source
+            
+            # Load model through the model factory
+            from ..models.model_factory import ModelFactory
+            model_factory = ModelFactory(self.config)
+            model = model_factory.create_model()
+            
+            if not model.load_model(exchange, symbol, timeframe):
+                self.logger.error("Failed to load model for backtesting")
+                return False
+            
+            # Run backtest with position sizing (delegates to the model's method)
+            # Check if the model class has the position sizing method
+            if hasattr(model, 'run_backtest_with_position_sizing'):
+                results, metrics, fig = model.run_backtest_with_position_sizing(
+                    df, 
+                    exchange=exchange,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    no_trade_threshold=no_trade_threshold,
+                    min_position_change=min_position_change
+                )
+                
+                # Add data source information
+                if isinstance(metrics, dict):
+                    metrics['data_source'] = data_source
+                
+                return results, metrics, fig
+            else:
+                self.logger.error("Model does not support position sizing backtest")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Error during position sizing test: {str(e)}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            return False
+
+
+    def run_multi_position_sizing_test(self, symbols, timeframes, exchange='binance',
+                                    no_trade_threshold=0.96, min_position_change=0.05):
+        """
+        Run position sizing tests across multiple symbols and timeframes
+        
+        Args:
+            symbols (list): List of trading pair symbols
+            timeframes (list): List of timeframes to test
+            exchange (str): Exchange name
+            no_trade_threshold (float): Threshold for no_trade probability
+            min_position_change (float): Minimum position change threshold
+                
+        Returns:
+            dict: Dictionary of results for all symbols and timeframes
+        """
+        self.logger.info(f"Running multi-symbol position sizing tests: {symbols}, {timeframes}")
+        
+        # Dictionary to store all results
+        all_results = {}
+        
+        # Process each symbol
+        for symbol in symbols:
+            symbol_results = {}
+            
+            # Process each timeframe for this symbol
+            for timeframe in timeframes:
+                self.logger.info(f"Running position sizing test for {symbol} {timeframe}")
+                
+                try:
+                    # Run position sizing test for this symbol/timeframe
+                    results, metrics, fig = self.run_position_sizing_test(
+                        exchange=exchange,
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        no_trade_threshold=no_trade_threshold,
+                        min_position_change=min_position_change
+                    )
+                    
+                    # Store results if successful
+                    if results is not False:
+                        symbol_results[timeframe] = {
+                            'results': results,
+                            'metrics': metrics,
+                            'fig': fig
+                        }
+                        
+                except Exception as e:
+                    self.logger.error(f"Error in position sizing test for {symbol} {timeframe}: {str(e)}")
+                    import traceback
+                    self.logger.error(traceback.format_exc())
+                    continue
+            
+            # Store all timeframe results for this symbol
+            if symbol_results:
+                all_results[symbol] = symbol_results
+        
+        # Create a summary report comparing performance across symbols and timeframes
+        if all_results:
+            self._create_position_sizing_summary(all_results, symbols, timeframes, exchange)
+            self.logger.info(f"Multi-symbol position sizing tests complete for {len(all_results)} symbols")
+        else:
+            self.logger.warning("No valid results were generated in multi-symbol position sizing tests")
+        
+        return all_results
+
+
+    def _create_position_sizing_summary(self, all_results, symbols, timeframes, exchange):
+        """
+        Create summary report for multi-symbol position sizing tests
+        
+        Args:
+            all_results (dict): Results dictionary
+            symbols (list): List of symbols
+            timeframes (list): List of timeframes
+            exchange (str): Exchange name
+                
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            # Create a DataFrame for summary metrics
+            summary_rows = []
+            
+            for symbol in symbols:
+                if symbol not in all_results:
+                    continue
+                    
+                for timeframe in timeframes:
+                    if timeframe not in all_results[symbol]:
+                        continue
+                    
+                    # Get performance metrics
+                    metrics = all_results[symbol][timeframe]['metrics']
+                    
+                    summary_rows.append({
+                        'symbol': symbol,
+                        'timeframe': timeframe,
+                        'data_source': metrics.get('data_source', 'unknown'),
+                        'total_return': metrics.get('total_return', 0),
+                        'alpha': metrics.get('alpha', 0),
+                        'sharpe_ratio': metrics.get('sharpe_ratio', 0),
+                        'max_drawdown': metrics.get('max_drawdown', 0),
+                        'win_rate': metrics.get('win_rate', 0),
+                        'profit_factor': metrics.get('profit_factor', 0),
+                        'num_position_changes': metrics.get('num_position_changes', 0),
+                        'fee_drag': metrics.get('fee_drag', 0)
+                    })
+            
+            if not summary_rows:
+                self.logger.warning("No summary data available")
+                return False
+            
+            # Convert to DataFrame
+            summary_df = pd.DataFrame(summary_rows)
+            
+            # Save summary
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            output_dir = Path(f"data/backtest_results/{exchange}/summary")
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            summary_file = output_dir / f"pos_sizing_summary_{timestamp}.csv"
+            summary_df.to_csv(summary_file, index=False)
+            
+            # Create summary visualizations
+            self._plot_position_sizing_summary(summary_df, output_dir, timestamp)
+            
+            self.logger.info(f"Saved position sizing summary report to {summary_file}")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Error creating position sizing summary report: {str(e)}")
+            return False
+
+
+    def _plot_position_sizing_summary(self, summary_df, output_dir, timestamp):
+        """
+        Create summary visualizations for position sizing tests
+        
+        Args:
+            summary_df (DataFrame): Summary DataFrame with performance metrics
+            output_dir (Path): Directory to save plots
+            timestamp (str): Timestamp string for filenames
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            # Plot 1: Returns by symbol
+            plt.figure(figsize=(12, 6))
+            
+            # Group by symbol and calculate mean return
+            symbol_returns = summary_df.groupby('symbol')['total_return'].mean().sort_values(ascending=False) * 100
+            
+            # Create bar chart
+            plt.bar(symbol_returns.index, symbol_returns.values)
+            plt.axhline(y=0, color='r', linestyle='-', alpha=0.3)
+            
+            plt.title('Average Return by Symbol (Position Sizing)')
+            plt.xlabel('Symbol')
+            plt.ylabel('Return (%)')
+            plt.xticks(rotation=45)
+            
+            # Add text annotations
+            for i, v in enumerate(symbol_returns):
+                plt.text(i, v + 1, f'{v:.2f}%',
+                        ha='center', va='bottom',
+                        color='green' if v > 0 else 'red')
+            
+            plt.tight_layout()
+            returns_file = output_dir / f"pos_sizing_returns_by_symbol_{timestamp}.png"
+            plt.savefig(returns_file)
+            plt.close()
+            
+            # Plot 2: Sharpe ratio comparison
+            plt.figure(figsize=(12, 6))
+            
+            # Group by symbol and calculate mean Sharpe
+            symbol_sharpe = summary_df.groupby('symbol')['sharpe_ratio'].mean().sort_values(ascending=False)
+            
+            plt.bar(symbol_sharpe.index, symbol_sharpe.values)
+            plt.axhline(y=1, color='r', linestyle='--', alpha=0.3, label='Min acceptable')
+            
+            plt.title('Average Sharpe Ratio by Symbol (Position Sizing)')
+            plt.xlabel('Symbol')
+            plt.ylabel('Sharpe Ratio')
+            plt.xticks(rotation=45)
+            plt.legend()
+            
+            # Add text annotations
+            for i, v in enumerate(symbol_sharpe):
+                plt.text(i, v + 0.1, f'{v:.2f}',
+                        ha='center', va='bottom',
+                        color='green' if v > 1 else 'red')
+            
+            plt.tight_layout()
+            sharpe_file = output_dir / f"pos_sizing_sharpe_by_symbol_{timestamp}.png"
+            plt.savefig(sharpe_file)
+            plt.close()
+            
+            # Plot 3: Fee drag comparison
+            plt.figure(figsize=(12, 6))
+            
+            # Group by symbol and calculate mean fee drag
+            symbol_fees = summary_df.groupby('symbol')['fee_drag'].mean().sort_values() * 100
+            
+            plt.bar(symbol_fees.index, symbol_fees.values)
+            
+            plt.title('Fee Drag by Symbol (Position Sizing)')
+            plt.xlabel('Symbol')
+            plt.ylabel('Fee Drag (%)')
+            plt.xticks(rotation=45)
+            
+            # Add text annotations
+            for i, v in enumerate(symbol_fees):
+                plt.text(i, v + 0.01, f'{v:.3f}%',
+                        ha='center', va='bottom')
+            
+            plt.tight_layout()
+            fee_file = output_dir / f"pos_sizing_fee_drag_by_symbol_{timestamp}.png"
+            plt.savefig(fee_file)
+            plt.close()
+            
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Error creating position sizing summary plots: {str(e)}")
+            # Continue execution even if plotting fails
             return False

@@ -3,6 +3,7 @@ data/raw/
 data/processed/
 data/backtest_results/
 data/test_sets/
+data/walk_forward_results/
 
 # API keys and secrets
 *.env

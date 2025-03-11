@@ -26,8 +26,9 @@ from sklearn.model_selection import TimeSeriesSplit
 import pickle
 import json
 import matplotlib.pyplot as plt
-import os
 import time
+
+from .position_sizing import QuantumPositionSizer
 
 # Enable GPU memory growth to avoid allocating all GPU memory
 gpus = tf.config.list_physical_devices('GPU')
@@ -159,24 +160,26 @@ class TFBayesianModel:
         
         # Define the joint distribution using TensorFlow Probability
         def ordered_logistic_model():
-            # Priors for coefficients with normal distribution (like PyMC)
+            # Priors for coefficients with normal distribution
             betas = yield tfd.Normal(loc=tf.zeros(num_features), 
                                     scale=tf.ones(num_features) * 2.0,
                                     name='betas')
             
-            # Priors for cutpoints (thresholds between classes)
-            # Need to ensure they're ordered, so use a cumulative sum approach
-            cutpoint_deltas = yield tfd.LogNormal(loc=tf.zeros(1), scale=tf.ones(1) * 1.0,
-                                                name='cutpoint_deltas')
-            
+            # Prior for the first cutpoint
             cutpoint1 = yield tfd.Normal(loc=0.0, scale=10.0, name='cutpoint1')
-            cutpoint2 = cutpoint1 + cutpoint_deltas[0]
+            
+            # Prior for the distance between cutpoints (must be positive)
+            # Using a scalar to ensure consistency
+            cutpoint_delta = yield tfd.LogNormal(loc=0.0, scale=1.0, name='cutpoint_delta')
+            
+            # Second cutpoint is the first plus the delta
+            cutpoint2 = cutpoint1 + cutpoint_delta
             
             # Linear predictor - dot product of features and coefficients
-            logits = tf.matmul(X_train_tf, betas[:, tf.newaxis])[:, 0]
+            # Ensure consistent dimensions using reshape
+            logits = tf.matmul(X_train_tf, tf.reshape(betas, [num_features, 1]))[:, 0]
             
             # Calculate ordered logistic probabilities
-            # Following the cumulative probability approach
             p_leq_1 = tf.sigmoid(cutpoint1 - logits)
             p_leq_2 = tf.sigmoid(cutpoint2 - logits)
             
@@ -194,27 +197,20 @@ class TFBayesianModel:
         # Create the joint distribution
         model = tfd.JointDistributionCoroutineAutoBatched(ordered_logistic_model)
         
-        # Configure MCMC sampling
-        # Use Hamiltonian Monte Carlo (HMC) for better mixing
+        # For a more stable MCMC sampling, we'll start with simpler HMC
         hmc_kernel = tfp.mcmc.HamiltonianMonteCarlo(
             target_log_prob_fn=lambda *args: model.log_prob(args + (y_train_tf,)),
             step_size=0.01,
             num_leapfrog_steps=10
         )
         
-        # Use No-U-Turn Sampler for automatic step size adaptation
-        adaptive_hmc = tfp.mcmc.NoUTurnSampler(
-            target_log_prob_fn=lambda *args: model.log_prob(args + (y_train_tf,)),
-            step_size=0.01
-        )
-        
         # Add adaptation for better mixing
         adaptive_hmc = tfp.mcmc.TransformedTransitionKernel(
-            inner_kernel=adaptive_hmc,
+            inner_kernel=hmc_kernel,
             bijector=[
                 tfb.Identity(),  # For betas
-                tfb.Exp(),       # For cutpoint_deltas
-                tfb.Identity()   # For cutpoint1
+                tfb.Identity(),  # For cutpoint1
+                tfb.Exp()        # For cutpoint_delta (must be positive)
             ]
         )
         
@@ -228,25 +224,44 @@ class TFBayesianModel:
         # Run MCMC sampling - use GPU if available
         with tf.device('/GPU:0' if gpus else '/CPU:0'):
             print(f"Running MCMC sampling on {'/GPU:0' if gpus else '/CPU:0'}")
-            # Initialize from reasonable starting points
+            
+            # Initialize from reasonable starting points with explicit shapes
             initial_state = [
-                tf.zeros(num_features),         # betas
-                tf.ones(1),                     # cutpoint_deltas
-                tf.zeros(1)                     # cutpoint1
+                tf.zeros([num_features], dtype=tf.float32),    # betas
+                tf.constant(0.0, dtype=tf.float32),            # cutpoint1
+                tf.constant(1.0, dtype=tf.float32)             # cutpoint_delta
             ]
             
-            # Run the MCMC chain
-            posterior_samples, _ = tfp.mcmc.sample_chain(
+            # Run the MCMC chain with diagnostics
+            self.logger.info(f"Starting MCMC sampling with {self.num_samples} samples and {self.num_burnin_steps} burn-in steps")
+            
+            # Reduce sample count for very large datasets
+            if X_train.shape[0] > 1000000:
+                self.logger.info(f"Large dataset detected ({X_train.shape[0]} rows). Reducing sample count.")
+                self.num_samples = 500
+                self.num_burnin_steps = 300
+            
+            posterior_samples, trace = tfp.mcmc.sample_chain(
                 num_results=self.num_samples,
                 num_burnin_steps=self.num_burnin_steps,
                 current_state=initial_state,
                 kernel=adaptive_hmc,
-                trace_fn=None
+                trace_fn=lambda _, pkr: pkr.inner_results.inner_results.is_accepted
             )
+            
+            # Calculate acceptance rate
+            acceptance_rate = tf.reduce_mean(tf.cast(trace, tf.float32))
+            self.logger.info(f"MCMC sampling complete. Acceptance rate: {acceptance_rate:.2f}")
         
         # Store model and samples
         self.model = model
         self.posterior_samples = posterior_samples
+        
+        # Reorganize posterior samples if needed
+        # The order in posterior_samples is now [betas, cutpoint1, cutpoint_delta]
+        # which differs from your predict_probabilities method that expects [betas, cutpoint_deltas, cutpoint1]
+        # You'll need to adjust predict_probabilities accordingly
+        
         return model, posterior_samples
     
     def train(self, exchange='binance', symbol='BTC/USDT', timeframe='1h', test_size=0.3, custom_df=None, reservoir_df=None):
@@ -379,10 +394,10 @@ class TFBayesianModel:
         # Convert to TensorFlow tensor
         X_tf = tf.cast(X_scaled, tf.float32)
         
-        # Get posterior samples
+        # Get posterior samples [betas, cutpoint1, cutpoint_delta]
         beta_samples = self.posterior_samples[0]  # Shape: [num_samples, num_features]
-        cutpoint_delta_samples = self.posterior_samples[1]  # Shape: [num_samples, 1]
-        cutpoint1_samples = self.posterior_samples[2]  # Shape: [num_samples, 1]
+        cutpoint1_samples = self.posterior_samples[1]  # Shape: [num_samples, 1]
+        cutpoint_delta_samples = self.posterior_samples[2]  # Shape: [num_samples, 1]
         
         # Compute cutpoint2
         cutpoint2_samples = cutpoint1_samples + cutpoint_delta_samples
@@ -1287,3 +1302,69 @@ class TFBayesianModel:
             import traceback
             self.logger.error(traceback.format_exc())
             return False
+        
+    def run_backtest_with_position_sizing(self, df_or_X, exchange='binance', symbol='BTC/USDT', 
+                                            timeframe='1h', no_trade_threshold=0.96, 
+                                            min_position_change=0.05, save_results=True):
+        """
+        Run a backtest with quantum-inspired position sizing.
+        
+        Args:
+            df_or_X: DataFrame with market data or pre-scaled feature array
+            exchange: Exchange name for result saving
+            symbol: Trading pair symbol for result saving
+            timeframe: Timeframe for result saving
+            no_trade_threshold: Threshold for no_trade probability to ignore signals
+            min_position_change: Minimum position change to avoid fee churn
+            save_results: Whether to save results to disk
+            
+        Returns:
+            tuple: (result_df, metrics, fig) - Processed DataFrame, performance metrics, and plot
+        """
+        # Get probabilities if input is a DataFrame
+        if isinstance(df_or_X, pd.DataFrame):
+            df = df_or_X.copy()
+            
+            # Get predictions if not already present
+            if not all(col in df.columns for col in ['short_prob', 'no_trade_prob', 'long_prob']):
+                self.logger.info("Getting predictions for backtest data")
+                probs = self.predict_probabilities(df)
+                
+                # Add probabilities to dataframe
+                df['short_prob'] = probs[:, 0]
+                df['no_trade_prob'] = probs[:, 1]
+                df['long_prob'] = probs[:, 2]
+        else:
+            self.logger.error("Input must be a DataFrame with market data")
+            return None, None, None
+        
+        # Get fee rate from config
+        fee_rate = self.config.get('backtesting', {}).get('fee_rate', 0.0006)
+        
+        # Initialize position sizer
+        position_sizer = QuantumPositionSizer(
+            fee_rate=fee_rate,
+            no_trade_threshold=no_trade_threshold,
+            confidence_scaling=True,
+            volatility_scaling=True,
+            max_position=1.0,
+            min_position_change=min_position_change,
+            initial_capital=10000.0
+        )
+        
+        self.logger.info(f"Running quantum position sizing backtest with no_trade_threshold={no_trade_threshold}")
+        
+        # Process dataframe
+        result_df = position_sizer.process_dataframe(df)
+        
+        # Calculate performance metrics
+        metrics = position_sizer.analyze_performance(result_df)
+        
+        # Plot results
+        fig, _ = position_sizer.plot_results(result_df)
+        
+        # Save results if requested
+        if save_results:
+            position_sizer.save_results(result_df, metrics, fig, exchange, symbol, timeframe)
+        
+        return result_df, metrics, fig
