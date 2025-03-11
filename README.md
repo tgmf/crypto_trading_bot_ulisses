@@ -226,6 +226,161 @@ The system generates trading performance visualizations:
 - Probability distribution evolution
 - Model consistency evaluation
 
+# TensorFlow Environment Setup
+
+## Separate Environment for TensorFlow-based Models
+
+Due to dependency conflicts between PyMC/Arviz and TensorFlow, we maintain separate conda environments for different model types. This approach ensures maximum compatibility and stability without sacrificing functionality.
+
+### Creating the TensorFlow Environment
+
+```bash
+# Create a new environment specifically for TensorFlow
+conda create -n tf_trading_env python=3.10
+conda activate tf_trading_env
+
+# Install TensorFlow with GPU support
+pip install tensorflow==2.16.1
+pip install tensorflow-probability==0.23.0
+
+# Install core dependencies
+conda install -c conda-forge numpy=1.24.3 pandas matplotlib
+pip install scikit-learn ccxt pandas-ta
+
+# Install other project dependencies
+pip install -r requirements-minimal.txt
+```
+
+### Switching Between Environments
+
+#### For Bayesian Model Training (PyMC-based)
+```bash
+conda activate trading_env
+./launch.sh train --symbols 'BTC/USDT' --timeframes '1h' --model bayesian
+```
+
+#### For TensorFlow Model Training (GPU-accelerated)
+```bash
+conda activate tf_trading_env
+./launch.sh train --symbols 'BTC/USDT' --timeframes '1h' --model tf_bayesian
+```
+
+### Creating a requirements-minimal.txt File
+
+To facilitate TensorFlow environment setup, create a `requirements-minimal.txt` file with minimal dependencies:
+
+```
+# Core dependencies
+pandas>=1.5.0
+numpy>=1.24.0,<1.25.0
+matplotlib>=3.7.0
+scikit-learn>=1.0.0
+
+# Trading-specific
+ccxt>=4.0.0
+pandas-ta>=0.3.14b0
+
+# Data handling
+pyarrow>=12.0.0
+pyyaml>=6.0
+python-dotenv>=1.0.0
+
+# Logging and utilities
+tqdm>=4.65.0
+schedule>=1.2.0
+psutil>=5.9.0
+```
+
+### Environment Selection in Model Factory
+
+The `model_factory.py` script has been updated to select the appropriate model based on the environment:
+
+```python
+def create_model(self):
+    """Create a model based on configuration"""
+    model_type = self.config.get('model', {}).get('type', 'bayesian')
+    
+    # Check if we're in the TensorFlow environment
+    try:
+        import tensorflow as tf
+        tf_available = True
+        self.logger.info(f"TensorFlow {tf.__version__} detected")
+    except ImportError:
+        tf_available = False
+    
+    # Check if we're in the PyMC environment
+    try:
+        import pymc as pm
+        pymc_available = True
+        self.logger.info(f"PyMC {pm.__version__} detected")
+    except ImportError:
+        pymc_available = False
+    
+    # Select model based on type and available packages
+    if model_type == 'tf_bayesian' and tf_available:
+        self.logger.info("Creating TensorFlow-based Bayesian model")
+        from .tf_bayesian_model import TFBayesianModel
+        return TFBayesianModel(self.config)
+    elif model_type == 'bayesian' and pymc_available:
+        self.logger.info("Creating PyMC-based Bayesian model")
+        from .bayesian_model import BayesianModel
+        return BayesianModel(self.config)
+    elif pymc_available:
+        self.logger.info(f"Unknown or unavailable model type: {model_type}, using PyMC-based Bayesian model")
+        from .bayesian_model import BayesianModel
+        return BayesianModel(self.config)
+    elif tf_available:
+        self.logger.info(f"PyMC not available but TensorFlow found, using TensorFlow-based Bayesian model")
+        from .tf_bayesian_model import TFBayesianModel
+        return TFBayesianModel(self.config)
+    else:
+        self.logger.error("Neither PyMC nor TensorFlow available. Please install either package.")
+        raise ImportError("Neither PyMC nor TensorFlow available. Please install either package.")
+```
+
+### Sharing Models Between Environments
+
+Models trained in either environment can be shared via the saved model files. Since models are saved to disk and loaded based on file paths, a model trained in the TensorFlow environment can be used for prediction in the PyMC environment, and vice versa, through the respective loading functions.
+
+### GPU Monitoring
+
+While using the TensorFlow environment, you can monitor GPU utilization with:
+
+```bash
+# For NVIDIA GPUs
+watch -n0.5 nvidia-smi
+
+# Detailed GPU stats
+nvidia-smi --query-gpu=timestamp,name,pci.bus_id,driver_version,temperature.gpu,utilization.gpu,utilization.memory,memory.total,memory.free,memory.used --format=csv -l 1
+```
+
+### Common Issues
+
+1. **OOM (Out of Memory) Errors**: If you encounter OOM errors, try:
+   ```python
+   # Limit GPU memory growth
+   gpus = tf.config.list_physical_devices('GPU')
+   if gpus:
+       tf.config.set_logical_device_configuration(
+           gpus[0], 
+           [tf.config.LogicalDeviceConfiguration(memory_limit=4096)]  # Limit to 4GB
+       )
+   ```
+
+2. **CUDA Version Conflicts**: If you see CUDA-related errors, ensure your NVIDIA drivers are compatible with TensorFlow:
+   ```bash
+   # Check CUDA version
+   nvcc --version
+   
+   # TensorFlow 2.16+ requires CUDA 11.8 or newer
+   ```
+
+3. **Mixed Precision Issues**: If you encounter numerical instability, try disabling mixed precision:
+   ```python
+   # Use full precision instead of mixed
+   tf.keras.mixed_precision.set_global_policy('float32')
+   ```
+
 ## 🤝 Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.

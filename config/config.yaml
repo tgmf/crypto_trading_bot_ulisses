@@ -1,7 +1,18 @@
 # Data Collection Settings
 data:
   model:
-    type: 'bayesian'
+    type: 'tf_bayesian'
+    feature_cols:
+      - bb_pos
+      - RSI_14
+      - MACDh_12_26_9
+      - trend_strength
+      - volatility
+      - volume_ratio
+      - range
+      - macd_hist_diff
+      - rsi_diff
+      - bb_squeeze
   timeframes:
     - 1m
   symbols:

@@ -2,6 +2,7 @@
 data/raw/
 data/processed/
 data/backtest_results/
+data/test_sets/
 
 # API keys and secrets
 *.env
