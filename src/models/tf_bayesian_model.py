@@ -1304,8 +1304,8 @@ class TFBayesianModel:
             return False
         
     def run_backtest_with_position_sizing(self, df_or_X, exchange='binance', symbol='BTC/USDT', 
-                                            timeframe='1h', no_trade_threshold=0.96, 
-                                            min_position_change=0.05, save_results=True):
+                                            timeframe='1m', no_trade_threshold=0.96, 
+                                            min_position_change=0.0012, save_results=True):
         """
         Run a backtest with quantum-inspired position sizing.
         

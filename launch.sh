@@ -30,7 +30,7 @@ show_help() {
   echo "  --file 'path/to/backtest.csv' - Specify file for analysis"
   echo "  --position-sizing             - Use quantum-inspired position sizing"
   echo "  --no-trade-threshold 0.96     - Threshold for no-trade probability (default: 0.96)"
-  echo "  --min-position-change 0.05    - Minimum position change to avoid fee churn (default: 0.05)"
+  echo "  --min-position-change 0.015    - Minimum position change to avoid fee churn (default: 0.005)"
   echo ""
   echo "Examples:"
   echo "  ./launch.sh train --timeframes '1h' --model bayesian"

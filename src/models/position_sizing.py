@@ -17,6 +17,8 @@ from pathlib import Path
 import json
 from datetime import datetime
 
+logging.basicConfig(level=logging.INFO)
+
 class QuantumPositionSizer:
     """
     Implements quantum-inspired position sizing based on probability distributions
@@ -33,10 +35,10 @@ class QuantumPositionSizer:
         self, 
         fee_rate: float = 0.0006,  # Per-side fee rate (0.06%)
         no_trade_threshold: float = 0.96,  # Threshold for no-trade zone
-        confidence_scaling: bool = True,  # Scale by confidence
+        confidence_scaling: bool = False,  # Scale by confidence
         volatility_scaling: bool = True,  # Scale by inverse volatility
         max_position: float = 1.0,  # Maximum position size (1.0 = 100% of available capital)
-        min_position_change: float = 0.05,  # Minimum position change to avoid fee churn
+        min_position_change: float = 0.0015,  # Minimum position change to avoid fee churn
         initial_capital: float = 10000.0,  # Initial capital for equity tracking
     ):
         self.fee_rate = fee_rate
@@ -54,9 +56,9 @@ class QuantumPositionSizer:
         no_trade_prob: float, 
         long_prob: float, 
         volatility: float = None
-    ) -> float:
+    ) -> Tuple[float, float]:
         """
-        Calculate the optimal position size based on probability distribution.
+        Calculate the optimal position sizes for long and short based on probability distribution.
         
         Args:
             short_prob: Probability of profitable short opportunity
@@ -65,36 +67,45 @@ class QuantumPositionSizer:
             volatility: Current market volatility (optional)
             
         Returns:
-            float: Position size from -1.0 (full short) to 1.0 (full long)
+            Tuple[float, float]: Long and short position sizes
         """
-        # Calculate raw position size based on probability difference
-        # We use long_prob - short_prob as our base position size multiplier
-        raw_position = long_prob - short_prob
+        self.logger.debug(f"Calculating position size with short_prob={short_prob}, no_trade_prob={no_trade_prob}, long_prob={long_prob}, volatility={volatility}")
         
         # Apply no-trade zone if no_trade_prob is above threshold
         if no_trade_prob > self.no_trade_threshold:
-            return 0.0
-            
+            self.logger.debug(f"No trade zone activated: no_trade_prob={no_trade_prob} > no_trade_threshold={self.no_trade_threshold}")
+            return 0.0, 0.0
+        
+        # Calculate raw position sizes
+        raw_long_position = long_prob
+        raw_short_position = short_prob
+        
         # Calculate confidence factor (higher when probabilities are more decisive)
-        confidence = max(long_prob, short_prob) - min(long_prob, short_prob)
+        confidence = (max(long_prob, short_prob) - min(long_prob, short_prob)) 
+        self.logger.debug(f"Confidence: {confidence}")
         
         # Apply confidence scaling if enabled
-        position = raw_position
+        long_position = raw_long_position
+        short_position = raw_short_position
         if self.confidence_scaling:
-            # Square the confidence to emphasize high confidence signals
             confidence_factor = confidence ** 2
-            position = raw_position * confidence_factor
-            
+            long_position = raw_long_position * confidence_factor
+            short_position = raw_short_position * confidence_factor
+            self.logger.debug(f"Positions after confidence scaling: long={long_position}, short={short_position}")
+        
         # Apply volatility scaling if enabled and volatility is provided
         if self.volatility_scaling and volatility is not None and volatility > 0:
-            # Inverse volatility relationship - lower position sizes during high volatility
             vol_factor = 1.0 / (1.0 + volatility * 10)  # Scale factor
-            position = position * vol_factor
-            
-        # Cap position at maximum allowed size
-        position = max(min(position, self.max_position), -self.max_position)
+            long_position = long_position * vol_factor
+            short_position = short_position * vol_factor
+            self.logger.debug(f"Positions after volatility scaling: long={long_position}, short={short_position}")
         
-        return position
+        # Cap positions at maximum allowed size
+        long_position = min(long_position, self.max_position)
+        short_position = min(short_position, self.max_position)
+        self.logger.debug(f"Final positions: long={long_position}, short={short_position}")
+        
+        return long_position, short_position
         
     def process_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -111,7 +122,9 @@ class QuantumPositionSizer:
         result_df = df.copy()
         
         # Initialize position tracking columns
-        result_df['target_position'] = 0.0  # Target position from model
+        result_df['target_long_position'] = 0.0  # Target long position from model
+        result_df['target_short_position'] = 0.0  # Target short position from model
+        result_df['target_position'] = 0.0  # Net target position from model
         result_df['actual_position'] = 0.0  # Actual position after min_change filter
         result_df['position_change'] = 0.0  # How much position changed
         result_df['fee_cost'] = 0.0  # Fee cost for each position change
@@ -136,12 +149,17 @@ class QuantumPositionSizer:
             # Get volatility if available
             volatility = result_df.iloc[i].get('volatility', None)
             
-            # Calculate target position size
-            target_position = self.calculate_position_size(
+            # Calculate target position sizes
+            target_long_position, target_short_position = self.calculate_position_size(
                 short_prob, no_trade_prob, long_prob, volatility
             )
             
-            # Store target position
+            # Store target positions
+            result_df.iloc[i, result_df.columns.get_loc('target_long_position')] = target_long_position
+            result_df.iloc[i, result_df.columns.get_loc('target_short_position')] = target_short_position
+            
+            # Calculate net target position
+            target_position = target_long_position - target_short_position
             result_df.iloc[i, result_df.columns.get_loc('target_position')] = target_position
             
             # Calculate position change
@@ -202,7 +220,13 @@ class QuantumPositionSizer:
         
         # Calculate Sharpe ratio (simplified, assuming zero risk-free rate)
         returns = df['strategy_returns'].dropna()
-        sharpe_ratio = returns.mean() / returns.std() * np.sqrt(252 * 24)  # Annualized for hourly data
+        std = returns.std()
+        if std > 0 and not np.isnan(std) and returns.mean() != 0:
+            sharpe_ratio = returns.mean() / std * np.sqrt(252 * 24)  # Annualized for hourly data
+        else:
+            # Handle the case when std is zero or NaN
+            self.logger.warning("Cannot calculate Sharpe ratio - no variation in returns or insufficient data")
+            sharpe_ratio = 0  # or np.nan if you prefer
         
         # Calculate maximum drawdown
         equity_curve = df['equity']
@@ -246,57 +270,42 @@ class QuantumPositionSizer:
             'fee_drag': fee_drag
         }
     
-    def plot_results(self, df: pd.DataFrame) -> Tuple[plt.Figure, plt.Axes]:
+    def plot_results(self, df: pd.DataFrame):
         """
-        Plot the strategy results.
+        Plot the backtest results including equity curve and positions.
         
         Args:
-            df: Processed DataFrame with position and return information
-            
+            df: DataFrame with backtest results
+                
         Returns:
-            Tuple: Figure and Axes objects
+            tuple: (fig, ax) - Matplotlib figure and axes
         """
-        # Create figure with subplots
-        fig, axes = plt.subplots(3, 1, figsize=(14, 16), gridspec_kw={'height_ratios': [2, 1, 1]})
+        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
         
-        # Plot 1: Price and Position
-        ax1 = axes[0]
-        ax1.plot(df.index, df['close'], color='black', alpha=0.7, label='Price')
-        
-        # Add colored background for position
-        for i in range(len(df) - 1):
-            color = 'green' if df.iloc[i]['actual_position'] > 0 else 'red' if df.iloc[i]['actual_position'] < 0 else 'gray'
-            alpha = min(abs(df.iloc[i]['actual_position']) * 0.8, 0.3)  # Scale transparency by position size
-            if alpha > 0.05:  # Only plot significant positions
-                ax1.axvspan(df.index[i], df.index[i+1], alpha=alpha, color=color, lw=0)
-        
-        ax1.set_title('Price and Position')
-        ax1.set_ylabel('Price')
+        # Plot equity curve
+        ax1.plot(df.index, df['equity'], label='Equity', color='blue')
+        ax1.set_title('Equity Curve')
+        ax1.set_ylabel('Equity')
         ax1.legend()
-        ax1.grid(True, alpha=0.3)
+        ax1.grid(True)
         
-        # Plot 2: Equity Curve
-        ax2 = axes[1]
-        ax2.plot(df.index, df['strategy_cumulative'] * 100, color='blue', label='Strategy')
-        ax2.plot(df.index, df['cumulative_returns'] * 100, color='gray', label='Buy & Hold')
-        ax2.set_title('Cumulative Returns (%)')
-        ax2.set_ylabel('Return (%)')
+        # Plot returns
+        ax2.plot(df.index, df['strategy_returns'], label='Strategy Returns', color='purple')
+        ax2.set_title('Strategy Returns')
+        ax2.set_ylabel('Returns')
         ax2.legend()
-        ax2.grid(True, alpha=0.3)
+        ax2.grid(True)
         
-        # Plot 3: Position Size
-        ax3 = axes[2]
-        ax3.plot(df.index, df['actual_position'], color='purple', label='Actual Position')
+        # Plot positions
         ax3.plot(df.index, df['target_position'], color='lightblue', alpha=0.5, label='Target Position')
-        ax3.set_title('Position Size')
-        ax3.set_xlabel('Date')
-        ax3.set_ylabel('Position (-1 to 1)')
-        ax3.set_ylim(-1.1, 1.1)
+        ax3.plot(df.index, df['actual_position'], color='darkblue', label='Actual Position')
+        ax3.set_title('Positions')
+        ax3.set_ylabel('Position')
         ax3.legend()
-        ax3.grid(True, alpha=0.3)
+        ax3.grid(True)
         
         plt.tight_layout()
-        return fig, axes
+        return fig, (ax1, ax2, ax3)
     
     def save_results(self, df, metrics, fig, exchange, symbol, timeframe):
         """

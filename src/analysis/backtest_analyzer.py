@@ -99,7 +99,29 @@ class BacktestAnalyzer:
         start_date = None
         end_date = None
         
+        # Determine the trade return column name - different methods use different naming
+        trade_return_col = None
+        position_size_col = None
+        
         # Process file in chunks
+        reader = pd.read_csv(file_path, chunksize=chunk_size)
+        
+        # Examine first chunk to determine column structure
+        first_chunk = next(reader)
+        
+        # Check available columns
+        if 'trade_return' in first_chunk.columns:
+            trade_return_col = 'trade_return'
+        elif 'position_return' in first_chunk.columns:  # Position sizing may use this name
+            trade_return_col = 'position_return'
+        elif 'trade_pnl' in first_chunk.columns:  # Another potential name
+            trade_return_col = 'trade_pnl'
+        
+        # Check for position size column
+        if 'position_size' in first_chunk.columns:
+            position_size_col = 'position_size'
+        
+        # Reset the reader to include first chunk
         reader = pd.read_csv(file_path, chunksize=chunk_size)
         
         for i, chunk in enumerate(reader):
@@ -124,40 +146,51 @@ class BacktestAnalyzer:
                 chunk['timestamp'] = pd.to_datetime(chunk['timestamp'])
                 end_date = chunk['timestamp'].max()
             
-            # Find trades in this chunk
-            trades = chunk[chunk['trade_return'].notna()]
-            
-            chunk_total_trades = len(trades)
-            total_trades += chunk_total_trades
-            
-            if chunk_total_trades > 0:
-                # Count winners and losers
-                winners = trades[trades['trade_return'] > 0]
-                losers = trades[trades['trade_return'] < 0]
+            # Find trades in this chunk if we have a trade return column
+            if trade_return_col is not None and trade_return_col in chunk.columns:
+                trades = chunk[chunk[trade_return_col].notna()]
                 
-                winning_trades += len(winners)
-                losing_trades += len(losers)
+                chunk_total_trades = len(trades)
+                total_trades += chunk_total_trades
                 
-                # Accumulate returns
-                total_win_return += winners['trade_return'].sum()
-                total_loss_return += losers['trade_return'].sum()
-                
-                # Track durations
-                if 'trade_duration' in trades.columns:
-                    trade_durations.extend(trades['trade_duration'].dropna().tolist())
+                if chunk_total_trades > 0:
+                    # Count winners and losers
+                    winners = trades[trades[trade_return_col] > 0]
+                    losers = trades[trades[trade_return_col] < 0]
+                    
+                    winning_trades += len(winners)
+                    losing_trades += len(losers)
+                    
+                    # Accumulate returns
+                    total_win_return += winners[trade_return_col].sum()
+                    total_loss_return += losers[trade_return_col].sum()
+                    
+                    # Track durations
+                    if 'trade_duration' in trades.columns:
+                        trade_durations.extend(trades['trade_duration'].dropna().tolist())
             
             # Track positions
             if 'position' in chunk.columns:
                 for pos in [-1, 0, 1, 2]:
                     position_counts[pos] += (chunk['position'] == pos).sum()
+                    
+            # Alternative: track position sizes if available
+            elif position_size_col is not None:
+                non_zero_positions = chunk[chunk[position_size_col] != 0]
+                pos_sizes = non_zero_positions[position_size_col]
+                
+                # Count positive and negative positions
+                position_counts[1] += (pos_sizes > 0).sum()
+                position_counts[-1] += (pos_sizes < 0).sum()
+                position_counts[0] += (chunk[position_size_col] == 0).sum()
             
-            self.logger.info(f"Processed chunk {i+1} with {chunk_rows} rows, {chunk_total_trades} trades")
-            
+            self.logger.info(f"Processed chunk {i+1} with {chunk_rows} rows, {chunk_total_trades if trade_return_col else 0} trades")
+        
         # Calculate statistics
         win_rate = winning_trades / total_trades if total_trades > 0 else 0
         average_win = total_win_return / winning_trades if winning_trades > 0 else 0
         average_loss = total_loss_return / losing_trades if losing_trades > 0 else 0
-        profit_factor = abs(total_win_return / total_loss_return) if total_loss_return < 0 else float('inf')
+        profit_factor = abs(total_win_return / total_loss_return) if total_loss_return < 0 and total_loss_return != 0 else float('inf')
         
         average_duration = np.mean(trade_durations) if trade_durations else 0
         
@@ -166,6 +199,13 @@ class BacktestAnalyzer:
         total_positions = sum(position_counts.values())
         for pos, count in position_counts.items():
             position_distribution[pos] = count / total_positions if total_positions > 0 else 0
+        
+        # Handle missing values
+        if final_values['strategy_cumulative'] is None and 'strategy_return' in first_chunk.columns:
+            # Try to calculate from strategy returns
+            strategy_returns = pd.read_csv(file_path, usecols=['strategy_return'])
+            if not strategy_returns.empty:
+                final_values['strategy_cumulative'] = (1 + strategy_returns['strategy_return']).cumprod().iloc[-1] - 1
         
         # Summarize results
         summary = {
@@ -187,7 +227,8 @@ class BacktestAnalyzer:
             'final_price': final_values['close'],
             'buy_hold_return': final_values['cumulative_returns'],
             'strategy_return': final_values['strategy_cumulative'],
-            'position_distribution': position_distribution
+            'position_distribution': position_distribution,
+            'position_sizing_used': position_size_col is not None
         }
         
         return summary
@@ -352,8 +393,8 @@ def main():
     parser = argparse.ArgumentParser(description='Analyze backtest results')
     parser.add_argument('--file', type=str, help='Path to backtest results file')
     parser.add_argument('--exchange', type=str, default='binance', help='Exchange name')
-    parser.add_argument('--symbol', type=str, default='BTC/USDT', help='Trading pair symbol')
-    parser.add_argument('--timeframe', type=str, help='Timeframe to analyze')
+    parser.add_argument('--symbols', type=str, default='BTC/USDT', help='Trading pair symbol')
+    parser.add_argument('--timeframes', type=str, help='Timeframe to analyze')
     parser.add_argument('--output', type=str, help='Output path for summary')
     parser.add_argument('--no-plot', action='store_true', help='Skip plotting')
     args = parser.parse_args()
@@ -370,7 +411,7 @@ def main():
     if args.file:
         file_path = Path(args.file)
     else:
-        file_path = analyzer.find_latest_backtest(args.exchange, args.symbol, args.timeframe)
+        file_path = analyzer.find_latest_backtest(args.exchange, args.symbols, args.timeframes)
     
     if not file_path or not file_path.exists():
         print(f"Error: Could not find backtest file to analyze")

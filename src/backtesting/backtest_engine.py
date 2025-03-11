@@ -818,7 +818,6 @@ class BacktestEngine:
                 data_source = "full_data"  # Track the data source
             
             # Load model through the model factory
-            from ..models.model_factory import ModelFactory
             model_factory = ModelFactory(self.config)
             model = model_factory.create_model()
             
