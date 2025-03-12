@@ -38,7 +38,7 @@ class QuantumPositionSizer:
         confidence_scaling: bool = False,  # Scale by confidence
         volatility_scaling: bool = True,  # Scale by inverse volatility
         max_position: float = 1.0,  # Maximum position size (1.0 = 100% of available capital)
-        min_position_change: float = 0.0015,  # Minimum position change to avoid fee churn
+        min_position_change: float = 0.005,  # Minimum position change to avoid fee churn
         initial_capital: float = 10000.0,  # Initial capital for equity tracking
     ):
         self.fee_rate = fee_rate
@@ -50,13 +50,7 @@ class QuantumPositionSizer:
         self.initial_capital = initial_capital
         self.logger = logging.getLogger(__name__)
         
-    def calculate_position_size(
-        self, 
-        short_prob: float, 
-        no_trade_prob: float, 
-        long_prob: float, 
-        volatility: float = None
-    ) -> Tuple[float, float]:
+    def calculate_position_size(self, short_prob, no_trade_prob, long_prob, volatility=None):
         """
         Calculate the optimal position sizes for long and short based on probability distribution.
         
@@ -65,7 +59,7 @@ class QuantumPositionSizer:
             no_trade_prob: Probability of no profitable opportunity
             long_prob: Probability of profitable long opportunity
             volatility: Current market volatility (optional)
-            
+                
         Returns:
             Tuple[float, float]: Long and short position sizes
         """
@@ -76,9 +70,21 @@ class QuantumPositionSizer:
             self.logger.debug(f"No trade zone activated: no_trade_prob={no_trade_prob} > no_trade_threshold={self.no_trade_threshold}")
             return 0.0, 0.0
         
-        # Calculate raw position sizes
+        # Ensure probabilities are normalized
+        total_prob = short_prob + no_trade_prob + long_prob
+        if abs(total_prob - 1.0) > 1e-6:  # Allow for small floating point errors
+            # Normalize if not already normalized
+            short_prob = short_prob / total_prob
+            no_trade_prob = no_trade_prob / total_prob
+            long_prob = long_prob / total_prob
+            self.logger.debug(f"Normalized probabilities: short={short_prob}, no_trade={no_trade_prob}, long={long_prob}")
+        
+        # Use these normalized probabilities as raw position sizes
         raw_long_position = long_prob
         raw_short_position = short_prob
+        
+        # Raw positions naturally sum to <= 1.0 since they're normalized probabilities
+        # (excluding no_trade_prob which doesn't contribute to position size)
         
         # Calculate confidence factor (higher when probabilities are more decisive)
         confidence = (max(long_prob, short_prob) - min(long_prob, short_prob)) 
@@ -100,10 +106,15 @@ class QuantumPositionSizer:
             short_position = short_position * vol_factor
             self.logger.debug(f"Positions after volatility scaling: long={long_position}, short={short_position}")
         
-        # Cap positions at maximum allowed size
-        long_position = min(long_position, self.max_position)
-        short_position = min(short_position, self.max_position)
-        self.logger.debug(f"Final positions: long={long_position}, short={short_position}")
+        # After scaling, the sum might exceed the max_position parameter
+        # Ensure the sum doesn't exceed maximum allowed position
+        total_position = long_position + short_position
+        if total_position > self.max_position:
+            # Scale both positions proportionally to maintain their ratio
+            scaling_factor = self.max_position / total_position
+            long_position *= scaling_factor
+            short_position *= scaling_factor
+            self.logger.debug(f"Positions after sum constraint: long={long_position}, short={short_position}")
         
         return long_position, short_position
         
@@ -111,23 +122,20 @@ class QuantumPositionSizer:
         """
         Process a DataFrame with model probabilities to generate position sizes
         and backtest performance.
-        
-        Args:
-            df: DataFrame with short_prob, no_trade_prob, long_prob columns
-                
-        Returns:
-            DataFrame: Original data with added position information
         """
         # Make a copy to avoid modifying the original
         result_df = df.copy()
         
         # Initialize position tracking columns
-        result_df['target_long_position'] = 0.0  # Target long position from model
-        result_df['target_short_position'] = 0.0  # Target short position from model
-        result_df['target_position'] = 0.0  # Net target position from model
-        result_df['actual_position'] = 0.0  # Actual position after min_change filter
-        result_df['position_change'] = 0.0  # How much position changed
-        result_df['fee_cost'] = 0.0  # Fee cost for each position change
+        result_df['target_long_position'] = 0.0
+        result_df['target_short_position'] = 0.0
+        result_df['target_net_position'] = 0.0
+        result_df['actual_long_position'] = 0.0
+        result_df['actual_short_position'] = 0.0
+        result_df['actual_net_position'] = 0.0
+        result_df['long_position_change'] = 0.0
+        result_df['short_position_change'] = 0.0
+        result_df['fee_cost'] = 0.0
         
         # Initialize performance tracking
         result_df['equity'] = self.initial_capital
@@ -136,8 +144,12 @@ class QuantumPositionSizer:
         if 'returns' not in result_df.columns:
             result_df['returns'] = result_df['close'].pct_change()
         
-        # Previous position starts at zero (flat)
-        prev_position = 0.0
+        # Initialize strategy returns
+        result_df['strategy_returns'] = 0.0
+        
+        # Previous positions start at zero (flat)
+        prev_long_position = 0.0
+        prev_short_position = 0.0
         
         # Process each row
         for i in range(len(result_df)):
@@ -157,38 +169,49 @@ class QuantumPositionSizer:
             # Store target positions
             result_df.iloc[i, result_df.columns.get_loc('target_long_position')] = target_long_position
             result_df.iloc[i, result_df.columns.get_loc('target_short_position')] = target_short_position
+            result_df.iloc[i, result_df.columns.get_loc('target_net_position')] = target_long_position - target_short_position
             
-            # Calculate net target position
-            target_position = target_long_position - target_short_position
-            result_df.iloc[i, result_df.columns.get_loc('target_position')] = target_position
-            
-            # Calculate position change
-            position_change = target_position - prev_position
+            # Calculate position changes
+            long_position_change = target_long_position - prev_long_position
+            short_position_change = target_short_position - prev_short_position
             
             # Apply minimum change filter to avoid fee churn
-            if abs(position_change) < self.min_position_change:
-                # Don't change position if change is too small
-                actual_position = prev_position
-                position_change = 0.0
+            actual_long_position = prev_long_position
+            actual_short_position = prev_short_position
+            
+            if abs(long_position_change) >= self.min_position_change:
+                actual_long_position = target_long_position
+                result_df.iloc[i, result_df.columns.get_loc('long_position_change')] = long_position_change
             else:
-                # Accept new position
-                actual_position = target_position
+                long_position_change = 0.0
                 
-            # Store actual position and change
-            result_df.iloc[i, result_df.columns.get_loc('actual_position')] = actual_position
-            result_df.iloc[i, result_df.columns.get_loc('position_change')] = position_change
+            if abs(short_position_change) >= self.min_position_change:
+                actual_short_position = target_short_position
+                result_df.iloc[i, result_df.columns.get_loc('short_position_change')] = short_position_change
+            else:
+                short_position_change = 0.0
+            
+            # Store actual positions
+            result_df.iloc[i, result_df.columns.get_loc('actual_long_position')] = actual_long_position
+            result_df.iloc[i, result_df.columns.get_loc('actual_short_position')] = actual_short_position
+            result_df.iloc[i, result_df.columns.get_loc('actual_net_position')] = actual_long_position - actual_short_position
             
             # Calculate fee cost (only on the portion that changed)
-            fee_cost = abs(position_change) * self.fee_rate
+            fee_cost = (abs(long_position_change) + abs(short_position_change)) * self.fee_rate
             result_df.iloc[i, result_df.columns.get_loc('fee_cost')] = fee_cost
             
-            # Update previous position for next iteration
-            prev_position = actual_position
+            # Update previous positions for next iteration
+            prev_long_position = actual_long_position
+            prev_short_position = actual_short_position
             
             # Skip return calculation for first row
             if i > 0:
-                # Calculate strategy return (position * market return - fees)
-                strategy_return = prev_position * result_df.iloc[i]['returns'] - fee_cost
+                # Calculate strategy return
+                market_return = result_df.iloc[i]['returns']
+                strategy_return = (prev_long_position * market_return) - (prev_short_position * market_return) - fee_cost
+                
+                # Store strategy return
+                result_df.iloc[i, result_df.columns.get_loc('strategy_returns')] = strategy_return
                 
                 # Update equity
                 prev_equity = result_df.iloc[i-1]['equity']
@@ -196,9 +219,6 @@ class QuantumPositionSizer:
         
         # Calculate cumulative returns
         result_df['cumulative_returns'] = (1 + result_df['returns']).cumprod() - 1
-        
-        # Calculate strategy returns
-        result_df['strategy_returns'] = result_df['equity'].pct_change()
         result_df['strategy_cumulative'] = (result_df['equity'] / self.initial_capital) - 1
         
         self.logger.info(f"Processed {len(result_df)} rows with quantum position sizing")
@@ -207,68 +227,89 @@ class QuantumPositionSizer:
     def analyze_performance(self, df: pd.DataFrame) -> dict:
         """
         Calculate performance metrics for the strategy.
-        
-        Args:
-            df: Processed DataFrame with position and return information
-            
-        Returns:
-            dict: Performance metrics
         """
-        # Extract relevant data
-        total_return = df['strategy_cumulative'].iloc[-1]
-        buy_hold_return = df['cumulative_returns'].iloc[-1]
-        
-        # Calculate Sharpe ratio (simplified, assuming zero risk-free rate)
-        returns = df['strategy_returns'].dropna()
-        std = returns.std()
-        if std > 0 and not np.isnan(std) and returns.mean() != 0:
-            sharpe_ratio = returns.mean() / std * np.sqrt(252 * 24)  # Annualized for hourly data
-        else:
-            # Handle the case when std is zero or NaN
-            self.logger.warning("Cannot calculate Sharpe ratio - no variation in returns or insufficient data")
-            sharpe_ratio = 0  # or np.nan if you prefer
-        
-        # Calculate maximum drawdown
-        equity_curve = df['equity']
-        running_max = equity_curve.cummax()
-        drawdown = (equity_curve / running_max - 1)
-        max_drawdown = drawdown.min()
-        
-        # Calculate win rate and average win/loss
-        daily_returns = df.resample('D')['strategy_returns'].sum()
-        win_rate = (daily_returns > 0).mean()
-        avg_win = daily_returns[daily_returns > 0].mean() if len(daily_returns[daily_returns > 0]) > 0 else 0
-        avg_loss = daily_returns[daily_returns < 0].mean() if len(daily_returns[daily_returns < 0]) > 0 else 0
-        
-        # Calculate profit factor
-        gross_profits = daily_returns[daily_returns > 0].sum()
-        gross_losses = abs(daily_returns[daily_returns < 0].sum())
-        profit_factor = gross_profits / gross_losses if gross_losses != 0 else float('inf')
-        
-        # Calculate position statistics
-        avg_position = df['actual_position'].abs().mean()
-        position_changes = df[df['position_change'] != 0]
-        num_position_changes = len(position_changes)
-        
-        # Calculate fee impact
-        total_fees = df['fee_cost'].sum()
-        fee_drag = total_fees / self.initial_capital
-        
-        return {
-            'total_return': total_return,
-            'buy_hold_return': buy_hold_return,
-            'alpha': total_return - buy_hold_return,
-            'sharpe_ratio': sharpe_ratio,
-            'max_drawdown': max_drawdown,
-            'win_rate': win_rate,
-            'avg_win': avg_win,
-            'avg_loss': avg_loss,
-            'profit_factor': profit_factor,
-            'avg_position': avg_position,
-            'num_position_changes': num_position_changes,
-            'total_fees': total_fees,
-            'fee_drag': fee_drag
-        }
+        try:
+            # Verify essential columns exist
+            required_columns = ['strategy_returns', 'strategy_cumulative', 'equity', 'cumulative_returns']
+            missing_columns = [col for col in required_columns if col not in df.columns]
+            
+            if missing_columns:
+                self.logger.error(f"Missing required columns: {missing_columns}")
+                # Return basic metrics with zeros
+                return {
+                    'total_return': 0.0,
+                    'buy_hold_return': 0.0,
+                    'alpha': 0.0,
+                    'sharpe_ratio': 0.0,
+                    'max_drawdown': 0.0,
+                    'win_rate': 0.0,
+                    'total_trades': 0,
+                    'error': f"Missing columns: {missing_columns}"
+                }
+                
+            # Extract relevant data
+            total_return = df['strategy_cumulative'].iloc[-1]
+            buy_hold_return = df['cumulative_returns'].iloc[-1]
+            
+            # Calculate Sharpe ratio (simplified, assuming zero risk-free rate)
+            returns = df['strategy_returns'].dropna()
+            std = returns.std()
+            if std > 0 and not np.isnan(std) and returns.mean() != 0:
+                sharpe_ratio = returns.mean() / std * np.sqrt(252 * 24)  # Annualized for hourly data
+            else:
+                self.logger.warning("Cannot calculate Sharpe ratio - no variation in returns or insufficient data")
+                sharpe_ratio = 0
+            
+            # Calculate maximum drawdown
+            equity_curve = df['equity']
+            running_max = equity_curve.cummax()
+            drawdown = (equity_curve / running_max - 1)
+            max_drawdown = drawdown.min()
+            
+            # Calculate win rate and average win/loss
+            daily_returns = df.resample('D')['strategy_returns'].sum()
+            win_rate = (daily_returns > 0).mean()
+            avg_win = daily_returns[daily_returns > 0].mean() if len(daily_returns[daily_returns > 0]) > 0 else 0
+            avg_loss = daily_returns[daily_returns < 0].mean() if len(daily_returns[daily_returns < 0]) > 0 else 0
+            
+            # Calculate profit factor
+            gross_profits = daily_returns[daily_returns > 0].sum()
+            gross_losses = abs(daily_returns[daily_returns < 0].sum())
+            profit_factor = gross_profits / gross_losses if gross_losses != 0 else float('inf')
+            
+            # Calculate position statistics
+            avg_position = df['actual_net_position'].abs().mean()
+            position_changes = df[(df['long_position_change'] != 0) | (df['short_position_change'] != 0)]
+            num_position_changes = len(position_changes)
+            
+            # Calculate fee impact
+            total_fees = df['fee_cost'].sum()
+            fee_drag = total_fees / self.initial_capital
+            
+            return {
+                'total_return': total_return,
+                'buy_hold_return': buy_hold_return,
+                'alpha': total_return - buy_hold_return,
+                'sharpe_ratio': sharpe_ratio,
+                'max_drawdown': max_drawdown,
+                'win_rate': win_rate,
+                'avg_win': avg_win,
+                'avg_loss': avg_loss,
+                'profit_factor': profit_factor,
+                'avg_position': avg_position,
+                'num_position_changes': num_position_changes,
+                'total_fees': total_fees,
+                'fee_drag': fee_drag
+            }
+        except Exception as e:
+            self.logger.error(f"Error analyzing performance: {str(e)}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            return {
+                'error': str(e),
+                'total_return': 0.0,
+                'buy_hold_return': 0.0
+            }
     
     def plot_results(self, df: pd.DataFrame):
         """
@@ -276,7 +317,7 @@ class QuantumPositionSizer:
         
         Args:
             df: DataFrame with backtest results
-                
+                    
         Returns:
             tuple: (fig, ax) - Matplotlib figure and axes
         """
@@ -297,8 +338,27 @@ class QuantumPositionSizer:
         ax2.grid(True)
         
         # Plot positions
-        ax3.plot(df.index, df['target_position'], color='lightblue', alpha=0.5, label='Target Position')
-        ax3.plot(df.index, df['actual_position'], color='darkblue', label='Actual Position')
+        # Check for column names and use the correct ones
+        if 'target_net_position' in df.columns:
+            ax3.plot(df.index, df['target_net_position'], color='lightblue', alpha=0.5, label='Target Net Position')
+        elif 'target_position' in df.columns:  # Backward compatibility
+            ax3.plot(df.index, df['target_position'], color='lightblue', alpha=0.5, label='Target Position')
+            
+        if 'actual_net_position' in df.columns:
+            ax3.plot(df.index, df['actual_net_position'], color='darkblue', label='Actual Net Position')
+        elif 'actual_position' in df.columns:  # Backward compatibility
+            ax3.plot(df.index, df['actual_position'], color='darkblue', label='Actual Position')
+        
+        # Add individual long and short positions if available
+        if 'target_long_position' in df.columns:
+            ax3.plot(df.index, df['target_long_position'], color='lightgreen', alpha=0.5, label='Target Long')
+        if 'target_short_position' in df.columns:
+            ax3.plot(df.index, df['target_short_position'], color='lightcoral', alpha=0.5, label='Target Short')
+        if 'actual_long_position' in df.columns:
+            ax3.plot(df.index, df['actual_long_position'], color='green', alpha=0.7, label='Actual Long')
+        if 'actual_short_position' in df.columns:
+            ax3.plot(df.index, df['actual_short_position'], color='red', alpha=0.7, label='Actual Short')
+        
         ax3.set_title('Positions')
         ax3.set_ylabel('Position')
         ax3.legend()

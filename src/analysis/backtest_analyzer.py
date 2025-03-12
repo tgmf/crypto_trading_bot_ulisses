@@ -318,63 +318,101 @@ class BacktestAnalyzer:
         
         # Plot 1: Returns comparison
         returns = [summary['strategy_return'], summary['buy_hold_return']]
-        axes[0, 0].bar(['Strategy', 'Buy & Hold'], returns, color=['purple', 'blue'])
-        axes[0, 0].set_title('Returns Comparison')
-        axes[0, 0].set_ylabel('Return (%)')
+        # Check if returns are valid numbers
+        if all(not np.isnan(r) for r in returns):
+            axes[0, 0].bar(['Strategy', 'Buy & Hold'], returns, color=['purple', 'blue'])
+            axes[0, 0].set_title('Returns Comparison')
+            axes[0, 0].set_ylabel('Return (%)')
+            
+            # Add text labels with percentages
+            for i, v in enumerate(returns):
+                axes[0, 0].text(i, v + 0.01 if v > 0 else v - 0.01, f'{v:.2%}', ha='center')
+        else:
+            axes[0, 0].text(0.5, 0.5, 'No return data available', 
+                        ha='center', va='center', transform=axes[0, 0].transAxes)
+            axes[0, 0].set_title('Returns Comparison (No Data)')
         
-        # Add text labels with percentages
-        for i, v in enumerate(returns):
-            axes[0, 0].text(i, v + 0.01, f'{v:.2%}', ha='center')
-        
-        # Plot 2: Win/Loss pie chart
-        axes[0, 1].pie(
-            [summary['winning_trades'], summary['losing_trades']], 
-            labels=['Wins', 'Losses'],
-            colors=['green', 'red'],
-            autopct='%1.1f%%'
-        )
-        axes[0, 1].set_title('Win/Loss Distribution')
+        # Plot 2: Win/Loss pie chart - only if we have valid trade data
+        if summary['winning_trades'] > 0 or summary['losing_trades'] > 0:
+            win_loss_data = [summary['winning_trades'], summary['losing_trades']]
+            axes[0, 1].pie(
+                win_loss_data, 
+                labels=['Wins', 'Losses'],
+                colors=['green', 'red'],
+                autopct='%1.1f%%'
+            )
+            axes[0, 1].set_title(f'Win/Loss Distribution (Total: {sum(win_loss_data)})')
+        else:
+            axes[0, 1].text(0.5, 0.5, 'No trade data available', 
+                        ha='center', va='center', transform=axes[0, 1].transAxes)
+            axes[0, 1].set_title('Win/Loss Distribution (No Data)')
         
         # Plot 3: Position distribution
         positions = []
         pos_counts = []
         pos_colors = {'Short': 'red', 'Flat': 'gray', 'Long': 'green', 'Hedged': 'purple'}
         
+        valid_distribution = False
         for pos, pct in summary['position_distribution'].items():
-            pos_label = {-1: "Short", 0: "Flat", 1: "Long", 2: "Hedged"}.get(pos, str(pos))
-            positions.append(pos_label)
-            pos_counts.append(pct)
+            if not np.isnan(pct) and pct > 0:
+                valid_distribution = True
+                pos_label = {-1: "Short", 0: "Flat", 1: "Long", 2: "Hedged"}.get(pos, str(pos))
+                positions.append(pos_label)
+                pos_counts.append(pct)
         
-        axes[1, 0].bar(positions, pos_counts, color=[pos_colors.get(p, 'blue') for p in positions])
-        axes[1, 0].set_title('Position Distribution')
-        axes[1, 0].set_ylabel('Percentage')
+        if valid_distribution:
+            axes[1, 0].bar(positions, pos_counts, color=[pos_colors.get(p, 'blue') for p in positions])
+            axes[1, 0].set_title('Position Distribution')
+            axes[1, 0].set_ylabel('Percentage')
+            
+            # Add text labels with percentages
+            for i, v in enumerate(pos_counts):
+                axes[1, 0].text(i, v + 0.01, f'{v:.2%}', ha='center')
+        else:
+            axes[1, 0].text(0.5, 0.5, 'No position data available', 
+                        ha='center', va='center', transform=axes[1, 0].transAxes)
+            axes[1, 0].set_title('Position Distribution (No Data)')
         
-        # Add text labels with percentages
-        for i, v in enumerate(pos_counts):
-            axes[1, 0].text(i, v + 0.01, f'{v:.2%}', ha='center')
+        # Plot 4: Key metrics - only if we have valid metrics
+        have_valid_metrics = (
+            not np.isnan(summary['win_rate']) and 
+            not np.isnan(summary['profit_factor']) and
+            not np.isnan(summary['average_win']) and
+            not np.isnan(summary['average_loss'])
+        )
         
-        # Plot 4: Key metrics
-        metrics = ['Win Rate', 'Profit Factor', 'Avg Win', 'Avg Loss']
-        values = [
-            summary['win_rate'], 
-            min(summary['profit_factor'], 5) / 5,  # Scale profit factor to 0-1 range, cap at 5
-            summary['average_win'],
-            abs(summary['average_loss'])
-        ]
-        
-        axes[1, 1].bar(metrics, values, color=['blue', 'orange', 'green', 'red'])
-        axes[1, 1].set_title('Key Performance Metrics')
-        
-        # Add custom y-axis labels for the metrics
-        ax2 = axes[1, 1].twinx()
-        ax2.set_ylim(axes[1, 1].get_ylim())
-        ax2.set_yticks([v for v in values])
-        ax2.set_yticklabels([
-            f'{summary["win_rate"]:.2%}',
-            f'{min(summary["profit_factor"], 5):.2f}',
-            f'{summary["average_win"]:.2%}',
-            f'{abs(summary["average_loss"]):.2%}'
-        ])
+        if have_valid_metrics and summary['total_trades'] > 0:
+            metrics = ['Win Rate', 'Profit Factor', 'Avg Win', 'Avg Loss']
+            values = [
+                summary['win_rate'], 
+                min(summary['profit_factor'], 5) / 5,  # Scale profit factor to 0-1 range, cap at 5
+                summary['average_win'],
+                abs(summary['average_loss'])
+            ]
+            
+            # Ensure no NaN values
+            if not any(np.isnan(v) for v in values):
+                axes[1, 1].bar(metrics, values, color=['blue', 'orange', 'green', 'red'])
+                axes[1, 1].set_title('Key Performance Metrics')
+                
+                # Add custom y-axis labels for the metrics
+                ax2 = axes[1, 1].twinx()
+                ax2.set_ylim(axes[1, 1].get_ylim())
+                ax2.set_yticks([v for v in values])
+                ax2.set_yticklabels([
+                    f'{summary["win_rate"]:.2%}',
+                    f'{min(summary["profit_factor"], 5):.2f}',
+                    f'{summary["average_win"]:.2%}',
+                    f'{abs(summary["average_loss"]):.2%}'
+                ])
+            else:
+                axes[1, 1].text(0.5, 0.5, 'Some metrics contain NaN values', 
+                            ha='center', va='center', transform=axes[1, 1].transAxes)
+                axes[1, 1].set_title('Key Performance Metrics (Invalid Data)')
+        else:
+            axes[1, 1].text(0.5, 0.5, 'No trade metrics available', 
+                        ha='center', va='center', transform=axes[1, 1].transAxes)
+            axes[1, 1].set_title('Key Performance Metrics (No Data)')
         
         # Set title and adjust layout
         fig.suptitle(f'Backtest Summary: {summary["timeframe"]} ({summary["data_source"]})', fontsize=16)
@@ -382,10 +420,14 @@ class BacktestAnalyzer:
         fig.subplots_adjust(top=0.9)
         
         # Save figure
-        plt.savefig(output_path)
-        plt.close(fig)
+        try:
+            plt.savefig(output_path)
+            self.logger.info(f"Summary plot saved to {output_path}")
+        except Exception as e:
+            self.logger.error(f"Error saving plot: {str(e)}")
+        finally:
+            plt.close(fig)
         
-        self.logger.info(f"Summary plot saved to {output_path}")
         return output_path
 
 def main():
@@ -418,20 +460,29 @@ def main():
         return 1
     
     # Analyze the file
-    summary = analyzer.analyze_file(file_path)
-    
-    # Print summary
-    analyzer.print_summary(summary)
-    
-    # Save summary
-    if args.output:
-        analyzer.save_summary(summary, args.output)
-    else:
-        analyzer.save_summary(summary)
-    
-    # Create plot
-    if not args.no_plot:
-        analyzer.plot_summary(summary)
+    try:
+        summary = analyzer.analyze_file(file_path)
+        
+        # Print summary
+        analyzer.print_summary(summary)
+        
+        # Save summary
+        if args.output:
+            analyzer.save_summary(summary, args.output)
+        else:
+            analyzer.save_summary(summary)
+        
+        # Create plot
+        if not args.no_plot:
+            try:
+                analyzer.plot_summary(summary)
+            except Exception as e:
+                print(f"Warning: Could not create summary plot: {str(e)}")
+                logging.error(f"Error creating plot: {str(e)}")
+    except Exception as e:
+        print(f"Error analyzing backtest file: {str(e)}")
+        logging.error(f"Error analyzing backtest file: {str(e)}")
+        return 1
     
     return 0
 

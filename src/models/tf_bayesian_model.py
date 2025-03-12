@@ -1305,66 +1305,71 @@ class TFBayesianModel:
         
     def run_backtest_with_position_sizing(self, df_or_X, exchange='binance', symbol='BTC/USDT', 
                                             timeframe='1m', no_trade_threshold=0.96, 
-                                            min_position_change=0.0012, save_results=True):
+                                            min_position_change=0.05, save_results=True):
         """
         Run a backtest with quantum-inspired position sizing.
-        
-        Args:
-            df_or_X: DataFrame with market data or pre-scaled feature array
-            exchange: Exchange name for result saving
-            symbol: Trading pair symbol for result saving
-            timeframe: Timeframe for result saving
-            no_trade_threshold: Threshold for no_trade probability to ignore signals
-            min_position_change: Minimum position change to avoid fee churn
-            save_results: Whether to save results to disk
-            
-        Returns:
-            tuple: (result_df, metrics, fig) - Processed DataFrame, performance metrics, and plot
         """
-        # Get probabilities if input is a DataFrame
-        if isinstance(df_or_X, pd.DataFrame):
-            df = df_or_X.copy()
-            
-            # Get predictions if not already present
-            if not all(col in df.columns for col in ['short_prob', 'no_trade_prob', 'long_prob']):
-                self.logger.info("Getting predictions for backtest data")
-                probs = self.predict_probabilities(df)
+        try:
+            # Get probabilities if input is a DataFrame
+            if isinstance(df_or_X, pd.DataFrame):
+                df = df_or_X.copy()
                 
-                # Add probabilities to dataframe
-                df['short_prob'] = probs[:, 0]
-                df['no_trade_prob'] = probs[:, 1]
-                df['long_prob'] = probs[:, 2]
-        else:
-            self.logger.error("Input must be a DataFrame with market data")
+                # Get predictions if not already present
+                if not all(col in df.columns for col in ['short_prob', 'no_trade_prob', 'long_prob']):
+                    self.logger.info("Getting predictions for backtest data")
+                    probs = self.predict_probabilities(df)
+                    
+                    # Add probabilities to dataframe
+                    df['short_prob'] = probs[:, 0]
+                    df['no_trade_prob'] = probs[:, 1]
+                    df['long_prob'] = probs[:, 2]
+            else:
+                self.logger.error("Input must be a DataFrame with market data")
+                return None, None, None
+            
+            # Get fee rate from config
+            fee_rate = self.config.get('backtesting', {}).get('fee_rate', 0.0006)
+            
+            # Initialize position sizer
+            position_sizer = QuantumPositionSizer(
+                fee_rate=fee_rate,
+                no_trade_threshold=no_trade_threshold,
+                confidence_scaling=False,
+                volatility_scaling=False,
+                max_position=1.0,
+                min_position_change=min_position_change,
+                initial_capital=10000.0
+            )
+            
+            self.logger.info(f"Running quantum position sizing backtest with no_trade_threshold={no_trade_threshold}")
+            
+            # Process dataframe
+            result_df = position_sizer.process_dataframe(df)
+            
+            # Verify that strategy_cumulative was created
+            if 'strategy_cumulative' not in result_df.columns:
+                self.logger.error("strategy_cumulative not found in processed results")
+                # Create it manually if necessary
+                if 'equity' in result_df.columns:
+                    result_df['strategy_cumulative'] = (result_df['equity'] / position_sizer.initial_capital) - 1
+            
+            # Calculate performance metrics
+            metrics = position_sizer.analyze_performance(result_df)
+            
+            # Check if metrics was generated successfully
+            if 'error' in metrics:
+                self.logger.error(f"Error in performance analysis: {metrics['error']}")
+            
+            # Plot results
+            fig, _ = position_sizer.plot_results(result_df)
+            
+            # Save results if requested
+            if save_results:
+                position_sizer.save_results(result_df, metrics, fig, exchange, symbol, timeframe)
+            
+            return result_df, metrics, fig
+        except Exception as e:
+            self.logger.error(f"Error in position sizing backtest: {str(e)}")
+            import traceback
+            self.logger.error(traceback.format_exc())
             return None, None, None
-        
-        # Get fee rate from config
-        fee_rate = self.config.get('backtesting', {}).get('fee_rate', 0.0006)
-        
-        # Initialize position sizer
-        position_sizer = QuantumPositionSizer(
-            fee_rate=fee_rate,
-            no_trade_threshold=no_trade_threshold,
-            confidence_scaling=True,
-            volatility_scaling=True,
-            max_position=1.0,
-            min_position_change=min_position_change,
-            initial_capital=10000.0
-        )
-        
-        self.logger.info(f"Running quantum position sizing backtest with no_trade_threshold={no_trade_threshold}")
-        
-        # Process dataframe
-        result_df = position_sizer.process_dataframe(df)
-        
-        # Calculate performance metrics
-        metrics = position_sizer.analyze_performance(result_df)
-        
-        # Plot results
-        fig, _ = position_sizer.plot_results(result_df)
-        
-        # Save results if requested
-        if save_results:
-            position_sizer.save_results(result_df, metrics, fig, exchange, symbol, timeframe)
-        
-        return result_df, metrics, fig

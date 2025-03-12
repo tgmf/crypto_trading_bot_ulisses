@@ -646,8 +646,8 @@ class BacktestEngine:
                     value = pivot_win_rate.iloc[i, j]
                     if not np.isnan(value):
                         plt.text(j + 0.5, i + 0.5, f'{value:.2f}',
-                                 ha='center', va='center',
-                                 color='white' if value < 0.5 else 'black')
+                                    ha='center', va='center',
+                                    color='white' if value < 0.5 else 'black')
             
             plt.tight_layout()
             win_rate_file = output_dir / f"win_rate_heatmap_{model_name}_{timestamp}.png"
@@ -697,11 +697,11 @@ class BacktestEngine:
                 width = 0.35
                 
                 plt.bar(x - width/2, 
-                      [source_metrics.loc['test_set', 'win_rate'], source_metrics.loc['test_set', 'final_return']], 
-                      width, label='Test Set')
+                        [source_metrics.loc['test_set', 'win_rate'], source_metrics.loc['test_set', 'final_return']], 
+                        width, label='Test Set')
                 plt.bar(x + width/2, 
-                      [source_metrics.loc['full_data', 'win_rate'], source_metrics.loc['full_data', 'final_return']], 
-                      width, label='Full Data')
+                        [source_metrics.loc['full_data', 'win_rate'], source_metrics.loc['full_data', 'final_return']], 
+                        width, label='Full Data')
                 
                 plt.title('Performance Comparison: Test Set vs Full Data')
                 plt.xticks(x, ['Win Rate', 'Return'])

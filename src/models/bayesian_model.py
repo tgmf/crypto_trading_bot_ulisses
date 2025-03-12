@@ -23,7 +23,10 @@ from sklearn.model_selection import TimeSeriesSplit
 import pickle
 import json
 import matplotlib.pyplot as plt
-# import pytensor
+import os
+os.environ["PYTENSOR_FLAGS"] = "mode=FAST_COMPILE"
+import pytensor
+pytensor.config.compute_test_value = "off"
 
 # pytensor.config.mode = 'NUMBA'
 
@@ -112,7 +115,7 @@ class BayesianModel:
     
     def build_model(self, X_train, y_train):
         """
-        Build Bayesian ordered logistic regression model with GPU acceleration
+        Build Bayesian ordered logistic regression model
         
         This method creates a Bayesian model with ordered logistic regression,
         which is appropriate for categorical outcomes with a natural ordering
@@ -125,6 +128,10 @@ class BayesianModel:
         Returns:
             tuple: (model, trace) - PyMC model and sampling trace
         """
+        import os
+        # Properly configure PyTensor
+        os.environ["PYTENSOR_FLAGS"] = "mode=FAST_COMPILE"
+        
         # Adjust y_train to be 0, 1, 2 instead of -1, 0, 1 for ordered logistic
         y_train_adj = y_train + 1
         
@@ -132,20 +139,36 @@ class BayesianModel:
         unique_classes = np.unique(y_train_adj)
         n_classes = len(unique_classes)
         
-        # Check for JAX GPU support without requiring import if not available
+        # Try to detect GPU with PyTensor first
+        import pytensor
+        gpu_available = False
+        
         try:
-            import jax
-            # Check if JAX can see GPUs
-            gpu_available = len(jax.devices('gpu')) > 0
-            if gpu_available:
-                from pymc.sampling.jax import sample_numpyro_nuts
-                self.logger.info("JAX GPU acceleration available. Using GPU for sampling.")
+            # First check if we can use GPU with PyTensor directly
+            gpu_device = pytensor.compile.get_device("gpu")
+            if gpu_device.startswith("gpu"):
+                self.logger.info(f"PyTensor GPU device detected: {gpu_device}")
+                gpu_available = True
             else:
-                self.logger.info("No GPU devices detected by JAX. Using CPU for sampling.")
-        except (ImportError, ModuleNotFoundError):
-            gpu_available = False
-            self.logger.info("JAX not available. Using CPU for sampling.")
-
+                # If PyTensor didn't find GPU, try JAX
+                try:
+                    # Import JAX components separately to avoid circular imports
+                    import jax.numpy as jnp
+                    from jax.lib import xla_bridge
+                    
+                    # Check if JAX can see the GPU
+                    platform = xla_bridge.get_backend().platform
+                    if platform == 'gpu':
+                        self.logger.info(f"JAX GPU platform detected: {platform}")
+                        from pymc.sampling.jax import sample_numpyro_nuts
+                        gpu_available = True
+                    else:
+                        self.logger.warning(f"JAX didn't detect GPU. Platform: {platform}")
+                except Exception as e:
+                    self.logger.warning(f"Error checking JAX GPU availability: {str(e)}")
+        except Exception as e:
+            self.logger.warning(f"Error checking PyTensor GPU: {str(e)}")
+        
         # Create PyMC model
         with pm.Model() as model:
             # Priors for unknown model parameters
@@ -159,25 +182,57 @@ class BayesianModel:
             eta = pm.math.dot(X_train, betas)
             
             # Ordered logistic regression likelihood
-            # NOTE: No need to add alpha to eta, as cutpoints handles that
             p = pm.OrderedLogistic("p", eta=eta, cutpoints=alpha, observed=y_train_adj)
             
-            # Sample from the posterior distribution with GPU if available, otherwise use standard NUTS
-            if gpu_available:
-                trace = sample_numpyro_nuts(
-                    draws=1000,
-                    tune=1000, 
-                    chains=2,
-                    target_accept=0.85,
-                    random_seed=42
-                )
-            else:
+            # Sample from the posterior distribution with GPU if available
+            if gpu_available and pytensor.compile.get_device("gpu").startswith("gpu"):
+                # If PyTensor GPU is available, use PyMC's standard sampler
+                self.logger.info("Starting GPU-accelerated sampling with PyTensor")
                 trace = pm.sample(
-                    draws=1000, 
-                    tune=1000,
-                    chains=2, 
-                    cores=1, 
-                    return_inferencedata=True
+                    draws=800,
+                    tune=500,
+                    chains=2,
+                    cores=1,
+                    target_accept=0.9,
+                    return_inferencedata=True,
+                    compute_convergence_checks=False
+                )
+                self.logger.info("GPU sampling completed successfully")
+            elif gpu_available:
+                # If JAX GPU is available, use the JAX sampler
+                self.logger.info("Starting GPU-accelerated sampling with NumPyro NUTS")
+                try:
+                    # Import here to ensure it's available
+                    from pymc.sampling.jax import sample_numpyro_nuts
+                    trace = sample_numpyro_nuts(
+                        draws=800,
+                        tune=500, 
+                        chains=2,
+                        target_accept=0.85,
+                        random_seed=42
+                    )
+                    self.logger.info("JAX GPU sampling completed successfully")
+                except Exception as e:
+                    self.logger.error(f"JAX GPU sampling failed: {str(e)}. Falling back to CPU.")
+                    trace = pm.sample(
+                        draws=800,
+                        tune=500,
+                        chains=1,
+                        cores=1,
+                        target_accept=0.9,
+                        return_inferencedata=True,
+                        compute_convergence_checks=False
+                    )
+            else:
+                self.logger.info("Using CPU sampling with PyMC NUTS")
+                trace = pm.sample(
+                    draws=800,
+                    tune=500,
+                    chains=1,
+                    cores=1,
+                    target_accept=0.9,
+                    return_inferencedata=True,
+                    compute_convergence_checks=False
                 )
         
         self.model = model
@@ -1092,16 +1147,6 @@ class BayesianModel:
             import traceback
             self.logger.error(traceback.format_exc())
             return False
-            
-        self.build_model(X_combined_scaled, y_combined)
-        
-        # Create a model name based on symbols and timeframes
-        model_name = self._generate_multi_model_name(symbols, timeframes)
-        
-        # Save model
-        self.save_model_multi(exchange, model_name)
-        
-        return True
 
     def _generate_multi_model_name(self, symbols, timeframes):
         """
