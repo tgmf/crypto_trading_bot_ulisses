@@ -65,6 +65,8 @@ def main():
                     help='Use time-series cross-validation for training')  # Argument for enabling time-series cross-validation
     parser.add_argument('--reverse', action='store_true',
                         help='Train on test set and evaluate on training set (for model consistency testing)')  # Argument for enabling reverse testing
+    parser.add_argument('--test-size', type=float, default=0.3,
+                        help='Proportion of data to use for testing (0.0-1.0)')  # Argument for specifying test size
     args = parser.parse_args()  # Parse the command-line arguments
     
     # Setup logging
@@ -131,20 +133,20 @@ def main():
                 logger.warning("Reverse training not supported for multi-symbol mode. Falling back to standard training.")
             if args.cv:
                 logger.warning("Cross-validation not supported for multi-symbol mode. Falling back to standard training.")
-            model.train_multi(symbols, timeframes, exchange)  # Train on multiple symbols/timeframes
+            model.train_multi(symbols, timeframes, exchange, test_size=args.test_size)  # Train on multiple symbols/timeframes
         else:
             if args.reverse:
                 # Use reversed dataset training
                 logger.info(f"Training with reversed datasets for {symbols[0]} {timeframes[0]} (for consistency testing)")
-                model.train_with_reversed_datasets(exchange, symbols[0], timeframes[0])  # Train on a single symbol/timeframe with reversed datasets
+                model.train_with_reversed_datasets(exchange, symbols[0], timeframes[0], test_size=args.test_size)  # Train on a single symbol/timeframe with reversed datasets
             elif args.cv:
                 # Use time-series cross-validation
                 logger.info(f"Training with time-series cross-validation for {symbols[0]} {timeframes[0]}")
-                model.train_with_cv(exchange, symbols[0], timeframes[0])  # Train on a single symbol/timeframe with time-series cross-validation
+                model.train_with_cv(exchange, symbols[0], timeframes[0], test_size=args.test_size)  # Train on a single symbol/timeframe with time-series cross-validation
             else:
                 # Standard training with train-test split
                 logger.info(f"Training with standard train-test split for {symbols[0]} {timeframes[0]}")
-                model.train(exchange, symbols[0], timeframes[0])  # Train on a single symbol/timeframe
+                model.train(exchange, symbols[0], timeframes[0], test_size=args.test_size)  # Train on a single symbol/timeframe
     elif args.mode == 'continue-train':
         # Load existing model
         model_factory = ModelFactory(config)

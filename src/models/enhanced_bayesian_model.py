@@ -134,58 +134,129 @@ class EnhancedBayesianModel:
         unique_classes = np.unique(y_train_adj)
         n_classes = len(unique_classes)
         
-        # Check for JAX GPU support without requiring import if not available
+        # Check if GPU is available for sampling
+        gpu_available = False
         try:
-            import jax
-            # Check if JAX can see GPUs
-            gpu_available = len(jax.devices('gpu')) > 0
-            if gpu_available:
-                from pymc.sampling.jax import sample_numpyro_nuts
-                self.logger.info("JAX GPU acceleration available. Using GPU for sampling.")
+            # First check if we can use GPU with PyTensor directly
+            import pytensor
+            
+            # Check if CUDA is available
+            if hasattr(pytensor.config, 'device'):
+                gpu_available = pytensor.config.device.startswith('cuda') or pytensor.config.device.startswith('gpu')
+                self.logger.info(f"PyTensor device config: {pytensor.config.device}")
             else:
-                self.logger.info("No GPU devices detected by JAX. Using CPU for sampling.")
-        except (ImportError, ModuleNotFoundError):
-            gpu_available = False
-            self.logger.info("JAX not available. Using CPU for sampling.")
+                # Alternative check for older versions
+                gpu_available = pytensor.config.device_arg.startswith('cuda') or pytensor.config.device_arg.startswith('gpu')
+                self.logger.info(f"PyTensor device_arg: {pytensor.config.device_arg}")
+                
+            if gpu_available:
+                self.logger.info("PyTensor GPU acceleration available")
+            else:
+                self.logger.info("PyTensor GPU not detected, falling back to CPU")
+                
+        except Exception as e:
+            self.logger.warning(f"Error checking PyTensor GPU: {str(e)}")
+    
+        # Try to build the model with robust error handling
+        try:
+            
+            # Create PyMC model
+            with pm.Model() as model:
+                # Priors for unknown model parameters
+                # For ordered logistic, we need n_classes-1 cutpoints
+            # Using smaller sigma for more stable initialization
+                alpha = pm.Normal("alpha", mu=0, sigma=6, shape=n_classes-1)
+                
+                # Coefficients for each feature with moderate regularization
+                betas = pm.Normal("betas", mu=0, sigma=2, shape=X_train.shape[1])
+                
+                # Linear predictor - dot product of features and coefficients
+                eta = pm.math.dot(X_train, betas)
+            
+                # Use testval to provide better starting values for cutpoints
+                # Set explicitly ordered starting values for the cutpoints
+                testval = np.linspace(-1, 1, n_classes-1)
+                alpha.tag.test_value = testval
+            
+                # Ensure stable starting points for the ordered logistic regression
+                # by enforcing stricter ordering of cutpoints
+                ordered_alpha = pm.Deterministic('ordered_alpha', pm.math.sort(alpha))
+                
+                # Ordered logistic regression likelihood
+                p = pm.OrderedLogistic("p", eta=eta, cutpoints=ordered_alpha, observed=y_train_adj)
+            
+                # Set more robust initial conditions
+                start = model.initial_point(jitter=0.01)
+                
+                # Sample with GPU if available, otherwise use standard NUTS
+                if gpu_available:
+                    # If PyTensor GPU is available, use PyMC's standard sampler
+                    self.logger.info("Starting GPU-accelerated sampling with PyMC")
+                    trace = pm.sample(
+                        draws=800,
+                        tune=500,
+                        chains=2,
+                        cores=1,
+                        target_accept=0.9,
+                        return_inferencedata=True,
+                        compute_convergence_checks=False
+                    )
+                    self.logger.info("GPU sampling completed successfully")
+                else:
+                    self.logger.info("Using CPU sampling with PyMC NUTS")
+                    trace = pm.sample(
+                        draws=800,
+                        tune=500,
+                        chains=1,
+                        cores=1,
+                        target_accept=0.9,
+                        return_inferencedata=True,
+                        compute_convergence_checks=False
+                    )
+            
+            self.model = model
+            self.trace = trace
+            return model, trace
         
-        # Create PyMC model
-        with pm.Model() as model:
-            # Priors for unknown model parameters
-            # For ordered logistic, we need n_classes-1 cutpoints
-            alpha = pm.Normal("alpha", mu=0, sigma=10, shape=n_classes-1)
+        except Exception as e:
+            self.logger.error(f"Initial model fitting failed: {str(e)}")
+            self.logger.info("Attempting fallback model with simpler priors...")
+        
+        # Fallback to a simpler model with explicit initialization and conservative settings
+        with pm.Model() as fallback_model:
+            # More conservative priors
+            alpha = pm.Normal("alpha", mu=0, sigma=1, shape=n_classes-1, 
+                                initval=np.array([-0.5, 0.5]))
             
-            # Coefficients for each feature with moderate regularization
-            betas = pm.Normal("betas", mu=0, sigma=2, shape=X_train.shape[1])
+            # Smaller prior variance for coefficients to prevent extreme values
+            betas = pm.Normal("betas", mu=0, sigma=0.5, shape=X_train.shape[1],
+                                initval=np.zeros(X_train.shape[1]))
             
-            # Linear predictor - dot product of features and coefficients
+            # Linear predictor
             eta = pm.math.dot(X_train, betas)
             
             # Ordered logistic regression likelihood
             p = pm.OrderedLogistic("p", eta=eta, cutpoints=alpha, observed=y_train_adj)
             
-            # Sample with GPU if available, otherwise use standard NUTS
-            if gpu_available:
-                trace = sample_numpyro_nuts(
-                    draws=1000,
-                    tune=1000, 
-                    chains=2,
-                    target_accept=0.85
-                )
-            else:
-                # For CPU sampling
-                trace = pm.sample(
-                    draws=1000, 
-                    tune=1000, 
-                    chains=2, 
-                    cores=1, 
-                    return_inferencedata=True
-                )
+            # Very conservative sampling settings
+            self.logger.info("Using conservative fallback sampling settings")
+            fallback_trace = pm.sample(
+                draws=600,
+                tune=1000,
+                chains=1,
+                cores=1,
+                init="adapt_diag",
+                target_accept=0.95,
+                return_inferencedata=True,
+                discard_tuned_samples=True,
+                compute_convergence_checks=False
+            )
         
-        self.model = model
-        self.trace = trace
-        return model, trace
+        self.model = fallback_model
+        self.trace = fallback_trace
+        return fallback_model, fallback_trace
     
-    def train(self, exchange='binance', symbol='BTC/USDT', timeframe='1h', test_size=0.3):
+    def train(self, exchange='binance', symbol='BTC/USDT', timeframe='1m', test_size=0.3):
         """
         Train the model on processed data with proper train-test split
         
@@ -202,6 +273,8 @@ class EnhancedBayesianModel:
             symbol (str): Trading pair symbol
             timeframe (str): Data timeframe
             test_size (float): Proportion of data to use for testing (0.0-1.0)
+            custom_df (DataFrame, optional): Custom DataFrame to use instead of loading from file
+            reservoir_df (DataFrame, optional): Reservoir sampled DataFrame to use for training
             
         Returns:
             tuple: (train_df, test_df) if successful, False otherwise
@@ -209,15 +282,23 @@ class EnhancedBayesianModel:
         self.logger.info(f"Training model for {exchange} {symbol} {timeframe} with train-test split")
         
         try:
-            # Load processed data
-            symbol_safe = symbol.replace('/', '_')
-            input_file = Path(f"data/processed/{exchange}/{symbol_safe}/{timeframe}.csv")
-            
-            if not input_file.exists():
-                self.logger.error(f"No processed data file found at {input_file}")
-                return False
+             # Use provided dataframe or load from file
+            if custom_df is not None:
+                df = custom_df.copy()
+                self.logger.info(f"Using custom DataFrame with {len(df)} samples")
+            elif reservoir_df is not None:
+                df = reservoir_df.copy()
+                self.logger.info(f"Using reservoir DataFrame with {len(df)} samples")
+            else:
+                # Load processed data
+                symbol_safe = symbol.replace('/', '_')
+                input_file = Path(f"data/processed/{exchange}/{symbol_safe}/{timeframe}.csv")
                 
-            df = pd.read_csv(input_file, index_col='timestamp', parse_dates=True)
+                if not input_file.exists():
+                    self.logger.error(f"No processed data file found at {input_file}")
+                    return False
+                    
+                df = pd.read_csv(input_file, index_col='timestamp', parse_dates=True)
             
             # Create target - must be done before splitting to avoid data leakage
             self.logger.info("Creating target variables")
@@ -234,6 +315,7 @@ class EnhancedBayesianModel:
             self.logger.info(f"Split data into training ({len(train_df)} samples) and test ({len(test_df)} samples)")
             
             # Save test data for later evaluation
+            symbol_safe = symbol.replace('/', '_')
             test_output_dir = Path(f"data/test_sets/{exchange}/{symbol_safe}")
             test_output_dir.mkdir(parents=True, exist_ok=True)
             test_output_file = test_output_dir / f"{timeframe}_test.csv"

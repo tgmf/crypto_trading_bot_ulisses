@@ -27,6 +27,7 @@ show_help() {
   echo "  --reverse                     - Train on test data and test on training data"
   echo "  --walk-forward                - Use walk-forward testing for backtesting"
   echo "  --model bayesian|tf_bayesian|enhanced_bayesian  - Specify model type to use"
+  echo "  --test-size 0.3               - Proportion of data to use for testing (default: 0.3)"
   echo "  --file 'path/to/backtest.csv' - Specify file for analysis"
   echo "  --position-sizing             - Use quantum-inspired position sizing"
   echo "  --no-trade-threshold 0.96     - Threshold for no-trade probability (default: 0.96)"
@@ -57,7 +58,7 @@ shift 1
 OPTIONS=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --symbols|--timeframes|--exchange|--template|--model|--no-trade-threshold|--min-position-change)
+    --symbols|--timeframes|--exchange|--template|--model|--no-trade-threshold|--min-position-change|--test-size)
       OPTIONS="$OPTIONS $1 $2"
       shift 2
       ;;

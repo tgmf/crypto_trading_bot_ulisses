@@ -128,10 +128,6 @@ class BayesianModel:
         Returns:
             tuple: (model, trace) - PyMC model and sampling trace
         """
-        import os
-        # Properly configure PyTensor
-        os.environ["PYTENSOR_FLAGS"] = "mode=FAST_COMPILE"
-        
         # Adjust y_train to be 0, 1, 2 instead of -1, 0, 1 for ordered logistic
         y_train_adj = y_train + 1
         
@@ -139,33 +135,26 @@ class BayesianModel:
         unique_classes = np.unique(y_train_adj)
         n_classes = len(unique_classes)
         
-        # Try to detect GPU with PyTensor first
-        import pytensor
+        # Check if GPU is available for sampling
         gpu_available = False
-        
         try:
             # First check if we can use GPU with PyTensor directly
-            gpu_device = pytensor.compile.get_device("gpu")
-            if gpu_device.startswith("gpu"):
-                self.logger.info(f"PyTensor GPU device detected: {gpu_device}")
-                gpu_available = True
+            import pytensor
+            
+            # Check if CUDA is available
+            if hasattr(pytensor.config, 'device'):
+                gpu_available = pytensor.config.device.startswith('cuda') or pytensor.config.device.startswith('gpu')
+                self.logger.info(f"PyTensor device config: {pytensor.config.device}")
             else:
-                # If PyTensor didn't find GPU, try JAX
-                try:
-                    # Import JAX components separately to avoid circular imports
-                    import jax.numpy as jnp
-                    from jax.lib import xla_bridge
-                    
-                    # Check if JAX can see the GPU
-                    platform = xla_bridge.get_backend().platform
-                    if platform == 'gpu':
-                        self.logger.info(f"JAX GPU platform detected: {platform}")
-                        from pymc.sampling.jax import sample_numpyro_nuts
-                        gpu_available = True
-                    else:
-                        self.logger.warning(f"JAX didn't detect GPU. Platform: {platform}")
-                except Exception as e:
-                    self.logger.warning(f"Error checking JAX GPU availability: {str(e)}")
+                # Alternative check for older versions
+                gpu_available = pytensor.config.device_arg.startswith('cuda') or pytensor.config.device_arg.startswith('gpu')
+                self.logger.info(f"PyTensor device_arg: {pytensor.config.device_arg}")
+                
+            if gpu_available:
+                self.logger.info("PyTensor GPU acceleration available")
+            else:
+                self.logger.info("PyTensor GPU not detected, falling back to CPU")
+                
         except Exception as e:
             self.logger.warning(f"Error checking PyTensor GPU: {str(e)}")
         
@@ -185,9 +174,9 @@ class BayesianModel:
             p = pm.OrderedLogistic("p", eta=eta, cutpoints=alpha, observed=y_train_adj)
             
             # Sample from the posterior distribution with GPU if available
-            if gpu_available and pytensor.compile.get_device("gpu").startswith("gpu"):
+            if gpu_available:
                 # If PyTensor GPU is available, use PyMC's standard sampler
-                self.logger.info("Starting GPU-accelerated sampling with PyTensor")
+                self.logger.info("Starting GPU-accelerated sampling with PyMC")
                 trace = pm.sample(
                     draws=800,
                     tune=500,
@@ -198,31 +187,6 @@ class BayesianModel:
                     compute_convergence_checks=False
                 )
                 self.logger.info("GPU sampling completed successfully")
-            elif gpu_available:
-                # If JAX GPU is available, use the JAX sampler
-                self.logger.info("Starting GPU-accelerated sampling with NumPyro NUTS")
-                try:
-                    # Import here to ensure it's available
-                    from pymc.sampling.jax import sample_numpyro_nuts
-                    trace = sample_numpyro_nuts(
-                        draws=800,
-                        tune=500, 
-                        chains=2,
-                        target_accept=0.85,
-                        random_seed=42
-                    )
-                    self.logger.info("JAX GPU sampling completed successfully")
-                except Exception as e:
-                    self.logger.error(f"JAX GPU sampling failed: {str(e)}. Falling back to CPU.")
-                    trace = pm.sample(
-                        draws=800,
-                        tune=500,
-                        chains=1,
-                        cores=1,
-                        target_accept=0.9,
-                        return_inferencedata=True,
-                        compute_convergence_checks=False
-                    )
             else:
                 self.logger.info("Using CPU sampling with PyMC NUTS")
                 trace = pm.sample(
