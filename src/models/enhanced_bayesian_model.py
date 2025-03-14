@@ -256,7 +256,7 @@ class EnhancedBayesianModel:
         self.trace = fallback_trace
         return fallback_model, fallback_trace
     
-    def train(self, exchange='binance', symbol='BTC/USDT', timeframe='1m', test_size=0.3):
+    def train(self, exchange='binance', symbol='BTC/USDT', timeframe='1m', test_size=0.3, custom_df=None, reservoir_df=None):
         """
         Train the model on processed data with proper train-test split
         
@@ -1454,64 +1454,149 @@ class EnhancedBayesianModel:
             self.logger.error(traceback.format_exc())
             return False
         
-    def train_with_reservoir(self, new_data_df, max_samples=10000, exchange='binance', symbol='BTC/USDT', timeframe='1h'):
-        """Train model using reservoir sampling to maintain a representative dataset"""
+    def train_with_reservoir(self, exchange='binance', symbol='BTC/USDT', timeframe='1h', max_samples=10000, new_data_df=None):
+        """
+        Train model using reservoir sampling to maintain a representative dataset
         
-        # Check if we already have a reservoir
-        reservoir_path = Path(f"data/reservoir/{exchange}/{symbol.replace('/', '_')}/{timeframe}.csv")
+        Reservoir sampling allows the model to maintain a fixed-size representative
+        dataset that combines historical and new data without biasing toward either.
+        This is useful for incremental learning in non-stationary environments like
+        financial markets.
         
-        if reservoir_path.exists():
-            # Load existing reservoir
-            reservoir_df = pd.read_csv(reservoir_path, index_col='timestamp', parse_dates=True)
-            self.logger.info(f"Loaded existing reservoir with {len(reservoir_df)} samples")
-        else:
-            # Create new reservoir
-            reservoir_df = pd.DataFrame()
-            reservoir_path.parent.mkdir(parents=True, exist_ok=True)
+        Args:
+            exchange (str): Exchange name
+            symbol (str): Trading pair symbol
+            timeframe (str): Data timeframe
+            max_samples (int): Maximum size of the reservoir
+            new_data_df (DataFrame, optional): New data to add to the reservoir
+            
+        Returns:
+            tuple: (train_df, test_df) if successful, False otherwise
+        """
+        self.logger.info(f"Training with reservoir sampling for {exchange} {symbol} {timeframe}")
         
-        # Add new data using reservoir sampling
-        if len(reservoir_df) < max_samples:
-            # Reservoir not full yet, just append
-            reservoir_df = pd.concat([reservoir_df, new_data_df])
-            if len(reservoir_df) > max_samples:
-                # If we exceeded max_samples, randomly sample
-                reservoir_df = reservoir_df.sample(max_samples)
-        else:
-            # Reservoir full, randomly replace elements
-            for i, row in new_data_df.iterrows():
-                if np.random.random() < len(new_data_df) / (len(reservoir_df) + i):
-                    # Replace a random element
-                    replace_idx = np.random.randint(0, len(reservoir_df))
-                    reservoir_df.iloc[replace_idx] = row
-        
-        # Save updated reservoir
-        reservoir_df.to_csv(reservoir_path)
-        self.logger.info(f"Updated reservoir with {len(reservoir_df)} samples")
-        
-        # Train on the reservoir
-        return self.train(exchange, symbol, timeframe, reservoir_df=reservoir_df)
+        try:
+            # Check if we already have a reservoir
+            symbol_safe = symbol.replace('/', '_')
+            reservoir_path = Path(f"data/reservoir/{exchange}/{symbol_safe}/{timeframe}.csv")
+            
+            if reservoir_path.exists():
+                # Load existing reservoir
+                reservoir_df = pd.read_csv(reservoir_path, index_col='timestamp', parse_dates=True)
+                self.logger.info(f"Loaded existing reservoir with {len(reservoir_df)} samples")
+            else:
+                # Create new reservoir
+                reservoir_df = pd.DataFrame()
+                reservoir_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # If new data provided, add it using reservoir sampling
+            if new_data_df is not None:
+                if len(reservoir_df) < max_samples:
+                    # Reservoir not full yet, just append
+                    reservoir_df = pd.concat([reservoir_df, new_data_df])
+                    if len(reservoir_df) > max_samples:
+                        # If we exceeded max_samples, randomly sample
+                        reservoir_df = reservoir_df.sample(max_samples)
+                else:
+                    # Reservoir full, randomly replace elements
+                    for i, row in new_data_df.iterrows():
+                        if np.random.random() < len(new_data_df) / (len(reservoir_df) + i):
+                            # Replace a random element
+                            replace_idx = np.random.randint(0, len(reservoir_df))
+                            reservoir_df.iloc[replace_idx] = row
+                
+                # Save updated reservoir
+                reservoir_df.to_csv(reservoir_path)
+                self.logger.info(f"Updated reservoir with {len(reservoir_df)} samples")
+            elif len(reservoir_df) == 0:
+                # No reservoir and no new data provided, load historical data
+                input_file = Path(f"data/processed/{exchange}/{symbol_safe}/{timeframe}.csv")
+                
+                if not input_file.exists():
+                    self.logger.error(f"No processed data file found at {input_file}")
+                    return False
+                    
+                historical_df = pd.read_csv(input_file, index_col='timestamp', parse_dates=True)
+                self.logger.info(f"Loaded {len(historical_df)} historical samples for initial reservoir")
+                
+                # Initialize reservoir with random sample from historical data
+                sample_size = min(len(historical_df), max_samples)
+                reservoir_df = historical_df.sample(sample_size)
+                
+                # Save initial reservoir
+                reservoir_df.to_csv(reservoir_path)
+                self.logger.info(f"Created initial reservoir with {len(reservoir_df)} samples")
+            
+            # Train on the reservoir
+            self.logger.info(f"Training on reservoir dataset with {len(reservoir_df)} samples")
+            return self.train(exchange=exchange, symbol=symbol, timeframe=timeframe, 
+                            test_size=0.2, custom_df=reservoir_df)
+            
+        except Exception as e:
+            self.logger.error(f"Error training with reservoir: {str(e)}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            return False
     
-    def train_with_time_weighting(self, all_data_df, exchange='binance', symbol='BTC/USDT', timeframe='1h', recency_weight=2.0):
-        """Train with time-weighted sampling (newer data gets higher probability)"""
+    def train_with_time_weighting(self, exchange='binance', symbol='BTC/USDT', timeframe='1h', recency_weight=2.0, all_data_df=None):
+        """
+        Train with time-weighted sampling (newer data gets higher probability)
         
-        # Sort by time
-        all_data_df = all_data_df.sort_index()
+        This method implements time-weighted sampling where more recent data points
+        have a higher probability of being selected for training. This helps the
+        model adapt to recent market conditions while still maintaining some
+        knowledge of historical patterns.
         
-        # Create time-based weights (newer data gets higher weight)
-        time_indices = np.arange(len(all_data_df))
-        weights = np.exp(recency_weight * time_indices / len(all_data_df))
-        weights = weights / weights.sum()  # Normalize
+        Args:
+            exchange (str): Exchange name
+            symbol (str): Trading pair symbol
+            timeframe (str): Data timeframe
+            recency_weight (float): Weight factor for recency (higher = more focus on recent data)
+            all_data_df (DataFrame, optional): Data to sample from, if None loads from file
+            
+        Returns:
+            tuple: (train_df, test_df) if successful, False otherwise
+        """
+        self.logger.info(f"Training with time-weighted sampling for {exchange} {symbol} {timeframe}")
         
-        # Sample with weights
-        sample_size = min(len(all_data_df), 50000)  # Adjust as needed
-        sampled_indices = np.random.choice(
-            len(all_data_df), 
-            size=sample_size, 
-            replace=False, 
-            p=weights
-        )
-        
-        sampled_df = all_data_df.iloc[sampled_indices]
-        
-        # Train on weighted sample
-        return self.train(exchange, symbol, timeframe, custom_df=sampled_df)
+        try:
+            # If no data provided, load from file
+            if all_data_df is None:
+                symbol_safe = symbol.replace('/', '_')
+                input_file = Path(f"data/processed/{exchange}/{symbol_safe}/{timeframe}.csv")
+                
+                if not input_file.exists():
+                    self.logger.error(f"No processed data file found at {input_file}")
+                    return False
+                    
+                all_data_df = pd.read_csv(input_file, index_col='timestamp', parse_dates=True)
+                
+            # Sort by time
+            all_data_df = all_data_df.sort_index()
+            
+            # Create time-based weights (newer data gets higher weight)
+            time_indices = np.arange(len(all_data_df))
+            weights = np.exp(recency_weight * time_indices / len(all_data_df))
+            weights = weights / weights.sum()  # Normalize
+            
+            # Sample with weights
+            sample_size = min(len(all_data_df), 50000)  # Adjust as needed
+            sampled_indices = np.random.choice(
+                len(all_data_df), 
+                size=sample_size, 
+                replace=False, 
+                p=weights
+            )
+            
+            sampled_df = all_data_df.iloc[sampled_indices]
+            self.logger.info(f"Created time-weighted sample with {len(sampled_df)} points")
+            
+            # Train on weighted sample
+            return self.train(exchange=exchange, symbol=symbol, timeframe=timeframe, 
+                            test_size=0.2, custom_df=sampled_df)
+            
+        except Exception as e:
+            self.logger.error(f"Error training with time weighting: {str(e)}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            return False
