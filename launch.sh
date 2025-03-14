@@ -14,6 +14,7 @@ show_help() {
   echo "  collect     - Collect historical data from exchanges"
   echo "  docker      - Run in Docker container"
   echo "  docker-dev  - Run development environment in Docker"
+  echo "  incremental    - Train incrementally on large datasets"
   echo "  notebook    - Launch Jupyter notebook for analysis"
   echo "  train       - Train trading model on collected data"
   echo "  help        - Show this help message"
@@ -37,6 +38,7 @@ show_help() {
   echo "  ./launch.sh train --timeframes '1h' --model bayesian"
   echo "  ./launch.sh train --symbols 'ETH/USDT' --timeframes '1m' --cv"
   echo "  ./launch.sh train --symbols 'BTC/USD ETH/USDT' --timeframes '1d' --reverse"
+  echo "  ./launch.sh incremental --symbol 'BTC/USDT' --timeframe '1m' --model enhanced_bayesian --chunk-size 50000"
   echo "  ./launch.sh backtest --symbols 'BTC/USD ETH/USD' --timeframes '1h 4h'"
   echo "  ./launch.sh backtest --symbols 'BTC/USD' --timeframes '1h' --walk-forward"
   echo "  ./launch.sh backtest --template crypto_majors"
@@ -58,7 +60,7 @@ shift 1
 OPTIONS=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --symbols|--timeframes|--exchange|--template|--model|--no-trade-threshold|--min-position-change|--test-size)
+    --symbols|--timeframes|--exchange|--template|--model|--no-trade-threshold|--min-position-change|--test-size|--chunk-size|--overlap)
       OPTIONS="$OPTIONS $1 $2"
       shift 2
       ;;
@@ -102,6 +104,16 @@ case "$COMMAND" in
   docker-dev)
     echo "Running development environment in Docker..."
     docker-compose run --rm trading_bot bash
+    ;;
+  incremental-gpu)
+    echo "Training incrementally on large dataset with FORCED GPU..."
+    
+    # Basic thread configuration
+    export OMP_NUM_THREADS=1
+    export MKL_NUM_THREADS=1
+    
+    # First force GPU configuration, then run training script
+    python -m src.utils.gpu_config && python -m src.training.incremental_training $OPTIONS
     ;;
   notebook)
     echo "Launching Jupyter notebook..."

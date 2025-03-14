@@ -16,6 +16,7 @@ data:
 # Model Settings
 model:
   type: 'tf_bayesian'
+  max_samples_per_batch: 50000
   feature_cols:
     - bb_pos
     - RSI_14

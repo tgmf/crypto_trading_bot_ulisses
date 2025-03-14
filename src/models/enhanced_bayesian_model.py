@@ -17,18 +17,38 @@ performance consistency across different market regimes.
 import logging
 import numpy as np
 import pandas as pd
-import pymc as pm
 import arviz as az
 from pathlib import Path
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import TimeSeriesSplit
 import pickle
 import json
+from datetime import datetime
 import matplotlib.pyplot as plt
-# import pytensor
+import seaborn as sns
+import os
+import pytensor
 
-# pytensor.config.mode = 'NUMBA'
-
+try:
+    pytensor.config.floatX = 'float32'
+    # For modern PyTensor, we avoid setting device directly
+    # as it's determined by backend capabilities
+    
+    # Check if GPU is available
+    import subprocess
+    has_nvidia = subprocess.call("nvidia-smi", shell=True, 
+                                stdout=subprocess.DEVNULL, 
+                                stderr=subprocess.DEVNULL) == 0
+    if has_nvidia:
+        # PyTensor will automatically use GPU if available with the default settings
+        print("GPU detected, PyTensor will use it if configured properly")
+except Exception as e:
+    print(f"Error configuring PyTensor: {e}")
+    
+# Now import PyMC
+import pymc as pm
+import pytensor.tensor as tt
+    
 class EnhancedBayesianModel:
     """
     Enhanced Bayesian model for trading signals with robust evaluation
@@ -114,7 +134,7 @@ class EnhancedBayesianModel:
     
     def build_model(self, X_train, y_train):
         """
-        Build Bayesian ordered logistic regression model with GPU acceleration when available
+        Build Enhanced Bayesian ordered logistic regression model with GPU acceleration when available
         
         This method creates a Bayesian model with ordered logistic regression,
         which is appropriate for categorical outcomes with a natural ordering
@@ -134,127 +154,75 @@ class EnhancedBayesianModel:
         unique_classes = np.unique(y_train_adj)
         n_classes = len(unique_classes)
         
-        # Check if GPU is available for sampling
-        gpu_available = False
-        try:
-            # First check if we can use GPU with PyTensor directly
-            import pytensor
-            
-            # Check if CUDA is available
-            if hasattr(pytensor.config, 'device'):
-                gpu_available = pytensor.config.device.startswith('cuda') or pytensor.config.device.startswith('gpu')
-                self.logger.info(f"PyTensor device config: {pytensor.config.device}")
-            else:
-                # Alternative check for older versions
-                gpu_available = pytensor.config.device_arg.startswith('cuda') or pytensor.config.device_arg.startswith('gpu')
-                self.logger.info(f"PyTensor device_arg: {pytensor.config.device_arg}")
-                
-            if gpu_available:
-                self.logger.info("PyTensor GPU acceleration available")
-            else:
-                self.logger.info("PyTensor GPU not detected, falling back to CPU")
-                
-        except Exception as e:
-            self.logger.warning(f"Error checking PyTensor GPU: {str(e)}")
-    
+        # Check current PyTensor configuration
+        self.logger.info(f"PyTensor device: {pytensor.config.device}")
+        self.logger.info(f"PyTensor floatX: {pytensor.config.floatX}")
+        
         # Try to build the model with robust error handling
         try:
-            
-            # Create PyMC model
             with pm.Model() as model:
-                # Priors for unknown model parameters
-                # For ordered logistic, we need n_classes-1 cutpoints
-            # Using smaller sigma for more stable initialization
-                alpha = pm.Normal("alpha", mu=0, sigma=6, shape=n_classes-1)
+                # Priors for model parameters
+                alpha = pm.Normal("alpha", mu=0, sigma=3, shape=n_classes-1)
+                betas = pm.Normal("betas", mu=0, sigma=1, shape=X_train.shape[1])
                 
-                # Coefficients for each feature with moderate regularization
-                betas = pm.Normal("betas", mu=0, sigma=2, shape=X_train.shape[1])
-                
-                # Linear predictor - dot product of features and coefficients
+                # Linear predictor
                 eta = pm.math.dot(X_train, betas)
-            
-                # Use testval to provide better starting values for cutpoints
-                # Set explicitly ordered starting values for the cutpoints
-                testval = np.linspace(-1, 1, n_classes-1)
-                alpha.tag.test_value = testval
-            
-                # Ensure stable starting points for the ordered logistic regression
-                # by enforcing stricter ordering of cutpoints
-                ordered_alpha = pm.Deterministic('ordered_alpha', pm.math.sort(alpha))
+                
+                # Use tt.sort for ordering cutpoints
+                ordered_alpha = pm.Deterministic('ordered_alpha', tt.sort(alpha))
                 
                 # Ordered logistic regression likelihood
-                p = pm.OrderedLogistic("p", eta=eta, cutpoints=ordered_alpha, observed=y_train_adj)
-            
-                # Set more robust initial conditions
-                start = model.initial_point(jitter=0.01)
+                pm.OrderedLogistic("p", eta=eta, cutpoints=ordered_alpha, observed=y_train_adj)
                 
-                # Sample with GPU if available, otherwise use standard NUTS
-                if gpu_available:
-                    # If PyTensor GPU is available, use PyMC's standard sampler
-                    self.logger.info("Starting GPU-accelerated sampling with PyMC")
-                    trace = pm.sample(
-                        draws=800,
-                        tune=500,
-                        chains=2,
-                        cores=1,
-                        target_accept=0.9,
-                        return_inferencedata=True,
-                        compute_convergence_checks=False
-                    )
-                    self.logger.info("GPU sampling completed successfully")
-                else:
-                    self.logger.info("Using CPU sampling with PyMC NUTS")
-                    trace = pm.sample(
-                        draws=800,
-                        tune=500,
-                        chains=1,
-                        cores=1,
-                        target_accept=0.9,
-                        return_inferencedata=True,
-                        compute_convergence_checks=False
-                    )
+                # Modern MCMC sampling with PyMC
+                self.logger.info("Starting MCMC sampling with PyMC")
+                trace = pm.sample(
+                    draws=800,
+                    tune=500,
+                    chains=2, 
+                    cores=1,  # Using >1 core can cause issues with some GPUs
+                    target_accept=0.9,
+                    return_inferencedata=True,
+                    compute_convergence_checks=False
+                )
             
             self.model = model
             self.trace = trace
             return model, trace
-        
+            
         except Exception as e:
             self.logger.error(f"Initial model fitting failed: {str(e)}")
             self.logger.info("Attempting fallback model with simpler priors...")
-        
-        # Fallback to a simpler model with explicit initialization and conservative settings
-        with pm.Model() as fallback_model:
-            # More conservative priors
-            alpha = pm.Normal("alpha", mu=0, sigma=1, shape=n_classes-1, 
-                                initval=np.array([-0.5, 0.5]))
             
-            # Smaller prior variance for coefficients to prevent extreme values
-            betas = pm.Normal("betas", mu=0, sigma=0.5, shape=X_train.shape[1],
-                                initval=np.zeros(X_train.shape[1]))
+            # Fallback to a simpler model
+            with pm.Model() as fallback_model:
+                # More conservative priors
+                alpha = pm.Normal("alpha", mu=0, sigma=1, shape=n_classes-1)
+                betas = pm.Normal("betas", mu=0, sigma=0.5, shape=X_train.shape[1])
+                
+                # Linear predictor
+                eta = pm.math.dot(X_train, betas)
+                
+                # Ordered logistic regression likelihood - no sorting to avoid errors
+                pm.OrderedLogistic("p", eta=eta, cutpoints=alpha, observed=y_train_adj)
+                
+                # Very conservative sampling settings
+                self.logger.info("Using conservative fallback sampling settings")
+                fallback_trace = pm.sample(
+                    draws=600,
+                    tune=1000,
+                    chains=1,
+                    cores=1,
+                    init="adapt_diag",
+                    target_accept=0.95,
+                    return_inferencedata=True,
+                    discard_tuned_samples=True,
+                    compute_convergence_checks=False
+                )
             
-            # Linear predictor
-            eta = pm.math.dot(X_train, betas)
-            
-            # Ordered logistic regression likelihood
-            p = pm.OrderedLogistic("p", eta=eta, cutpoints=alpha, observed=y_train_adj)
-            
-            # Very conservative sampling settings
-            self.logger.info("Using conservative fallback sampling settings")
-            fallback_trace = pm.sample(
-                draws=600,
-                tune=1000,
-                chains=1,
-                cores=1,
-                init="adapt_diag",
-                target_accept=0.95,
-                return_inferencedata=True,
-                discard_tuned_samples=True,
-                compute_convergence_checks=False
-            )
-        
-        self.model = fallback_model
-        self.trace = fallback_trace
-        return fallback_model, fallback_trace
+            self.model = fallback_model
+            self.trace = fallback_trace
+            return fallback_model, fallback_trace
     
     def train(self, exchange='binance', symbol='BTC/USDT', timeframe='1m', test_size=0.3, custom_df=None, reservoir_df=None):
         """
@@ -282,7 +250,7 @@ class EnhancedBayesianModel:
         self.logger.info(f"Training model for {exchange} {symbol} {timeframe} with train-test split")
         
         try:
-             # Use provided dataframe or load from file
+            # Use provided dataframe or load from file
             if custom_df is not None:
                 df = custom_df.copy()
                 self.logger.info(f"Using custom DataFrame with {len(df)} samples")
@@ -1396,18 +1364,36 @@ class EnhancedBayesianModel:
             return False
         
     def continue_training(self, new_data_df, exchange='binance', symbol='BTC/USDT', timeframe='1h'):
-        """Continue training an existing model with new data"""
-        self.logger.info(f"Continuing training for {exchange} {symbol} {timeframe}")
+        """
+        Continue training the model with new data
         
+        This method uses the current posterior distributions as priors for the new model,
+        effectively performing Bayesian updating.
+        
+        Args:
+            new_data_df (DataFrame): New data to train on
+            exchange (str): Exchange name
+            symbol (str): Trading pair symbol
+            timeframe (str): Data timeframe
+            
+        Returns:
+            bool: Success or failure
+        """
         # Check if a model exists
         if self.trace is None:
-            self.logger.error("No existing model found. Please train a model first.")
+            self.logger.error("No existing model found for continued training")
             return False
         
         try:
             # Process new data
-            X_new = new_data_df[self.feature_cols].values
+            self.logger.info(f"Continuing training with {len(new_data_df)} new samples")
+            
+            # Create target for new data
             new_data_df['target'] = self.create_target(new_data_df)
+            new_data_df = new_data_df.dropna(subset=['target'])
+            
+            # Extract feature columns
+            X_new = new_data_df[self.feature_cols].values
             y_new = new_data_df['target'].values
             
             # Scale new data using existing scaler
@@ -1424,29 +1410,73 @@ class EnhancedBayesianModel:
             # Adjust y for ordered logistic
             y_new_adj = y_new + 1
             
-            # Create new model with informed priors
-            with pm.Model() as new_model:
-                # Use previous posterior as new prior
-                alpha = pm.Normal("alpha", mu=alpha_mean, sigma=alpha_std, shape=2)
-                betas = pm.Normal("betas", mu=betas_mean, sigma=betas_std, shape=X_new_scaled.shape[1])
+            try:
+                # Create new model with informed priors
+                with pm.Model() as new_model:
+                    # Use previous posterior as new prior
+                    alpha = pm.Normal("alpha", mu=alpha_mean, sigma=alpha_std, shape=len(alpha_mean))
+                    betas = pm.Normal("betas", mu=betas_mean, sigma=betas_std, shape=len(betas_mean))
+                    
+                    # Linear predictor
+                    eta = pm.math.dot(X_new_scaled, betas)
+                    
+                    # Ordered logistic regression
+                    p = pm.OrderedLogistic("p", eta=eta, cutpoints=alpha, observed=y_new_adj)
+                    
+                    # Sample with more conservative settings for continued training
+                    self.logger.info("Sampling posterior for continued training")
+                    new_trace = pm.sample(
+                        draws=800, 
+                        tune=500, 
+                        chains=2, 
+                        cores=1, 
+                        return_inferencedata=True,
+                        target_accept=0.9
+                    )
                 
-                # Linear predictor
-                eta = pm.math.dot(X_new_scaled, betas)
+                # Update the model
+                self.model = new_model
+                self.trace = new_trace
                 
-                # Ordered logistic regression
-                p = pm.OrderedLogistic("p", eta=eta, cutpoints=alpha, observed=y_new_adj)
+                # Save updated model
+                self.save_model(exchange, symbol, timeframe)
                 
-                # Sample
-                new_trace = pm.sample(1000, tune=1000, chains=2, cores=1, return_inferencedata=True)
-            
-            # Update the model
-            self.model = new_model
-            self.trace = new_trace
-            
-            # Save updated model
-            self.save_model(exchange, symbol, timeframe)
-            
-            return True
+                return True
+                
+            except Exception as e:
+                self.logger.error(f"Error in standard continue_training: {str(e)}")
+                self.logger.info("Attempting fallback continued training with simpler model")
+                
+                # Fallback to simpler model
+                with pm.Model() as fallback_model:
+                    # More conservative priors and initialization
+                    alpha = pm.Normal("alpha", mu=alpha_mean, sigma=alpha_std * 0.5, shape=len(alpha_mean),
+                                    initval=alpha_mean)
+                    betas = pm.Normal("betas", mu=betas_mean, sigma=betas_std * 0.5, shape=len(betas_mean),
+                                    initval=betas_mean)
+                    
+                    eta = pm.math.dot(X_new_scaled, betas)
+                    p = pm.OrderedLogistic("p", eta=eta, cutpoints=alpha, observed=y_new_adj)
+                    
+                    # Very conservative sampling
+                    fallback_trace = pm.sample(
+                        draws=600, 
+                        tune=800, 
+                        chains=1, 
+                        cores=1, 
+                        return_inferencedata=True,
+                        target_accept=0.95,
+                        init="adapt_diag"
+                    )
+                
+                # Update model with fallback
+                self.model = fallback_model
+                self.trace = fallback_trace
+                
+                # Save updated model
+                self.save_model(exchange, symbol, timeframe)
+                
+                return True
             
         except Exception as e:
             self.logger.error(f"Error continuing training: {str(e)}")
@@ -1454,7 +1484,7 @@ class EnhancedBayesianModel:
             self.logger.error(traceback.format_exc())
             return False
         
-    def train_with_reservoir(self, exchange='binance', symbol='BTC/USDT', timeframe='1h', max_samples=10000, new_data_df=None):
+    def train_with_reservoir(self, exchange='binance', symbol='BTC/USDT', timeframe='1m', max_samples=10000, new_data_df=None):
         """
         Train model using reservoir sampling to maintain a representative dataset
         
