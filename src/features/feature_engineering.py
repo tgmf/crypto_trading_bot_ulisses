@@ -18,6 +18,7 @@ class FeatureEngineer:
         """Initialize with configuration"""
         self.config = config
         self.logger = logging.getLogger(__name__)
+        self.logger.debug("FeatureEngineer initialized")
         
     def process_data(self):
         """Process raw data and generate features"""
@@ -54,7 +55,7 @@ class FeatureEngineer:
                         self.logger.info(f"Saved processed data to {output_file}")
                         
                     except Exception as e:
-                        self.logger.error(f"Error processing {symbol} {timeframe}: {str(e)}")
+                        self.logger.error(f"FELOG. Error processing {symbol} {timeframe}: {str(e)}")
                         continue
     
     def _generate_features(self, df):

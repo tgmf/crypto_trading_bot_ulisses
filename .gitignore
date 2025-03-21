@@ -47,6 +47,7 @@ logs/
 
 # Conda environment
 Miniconda3-latest-Linux-x86_64.sh
+*.deb
 
 # Backup files
 *.tar.gz.bak

@@ -1,7 +1,7 @@
 # Data Collection Settings
 data:
   timeframes:
-    - 1m
+    - 15m
   symbols:
     - BTC/USDT
   start_date: 2011-01-01
@@ -15,7 +15,7 @@ data:
 
 # Model Settings
 model:
-  type: 'tf_bayesian'
+  type: 'enhanced_bayesian'
   max_samples_per_batch: 50000
   feature_cols:
     - bb_pos

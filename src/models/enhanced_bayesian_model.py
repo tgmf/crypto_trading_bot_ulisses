@@ -17,38 +17,29 @@ performance consistency across different market regimes.
 import logging
 import numpy as np
 import pandas as pd
+import pymc as pm
+import pytensor.tensor as tt
 import arviz as az
 from pathlib import Path
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import TimeSeriesSplit
 import pickle
 import json
-from datetime import datetime
 import matplotlib.pyplot as plt
-import seaborn as sns
-import os
-import pytensor
 
+# Set memory management for GPU training
 try:
-    pytensor.config.floatX = 'float32'
-    # For modern PyTensor, we avoid setting device directly
-    # as it's determined by backend capabilities
-    
-    # Check if GPU is available
-    import subprocess
-    has_nvidia = subprocess.call("nvidia-smi", shell=True, 
-                                stdout=subprocess.DEVNULL, 
-                                stderr=subprocess.DEVNULL) == 0
-    if has_nvidia:
-        # PyTensor will automatically use GPU if available with the default settings
-        print("GPU detected, PyTensor will use it if configured properly")
-except Exception as e:
-    print(f"Error configuring PyTensor: {e}")
-    
-# Now import PyMC
-import pymc as pm
-import pytensor.tensor as tt
-    
+    import pytensor
+    import os
+    # Only run if we're using CUDA
+    if 'cuda' in pytensor.config.device:
+        logging.info("Configuring PyTensor GPU memory management")
+        # Limit memory usage to avoid OOM errors
+        pytensor.config.gpuarray.preallocate = 0.8
+        os.environ["OMP_NUM_THREADS"] = "4"  # Control CPU threads for better GPU utilization
+except ImportError:
+    pass
+
 class EnhancedBayesianModel:
     """
     Enhanced Bayesian model for trading signals with robust evaluation
@@ -67,8 +58,8 @@ class EnhancedBayesianModel:
             config (dict): Configuration dictionary containing model parameters,
                             fee rates, and target thresholds
         """
-        self.config = config
         self.logger = logging.getLogger(__name__)
+        self.config = config
         self.model = None
         self.trace = None
         self.scaler = StandardScaler()
@@ -175,14 +166,12 @@ class EnhancedBayesianModel:
                 pm.OrderedLogistic("p", eta=eta, cutpoints=ordered_alpha, observed=y_train_adj)
                 
                 # Modern MCMC sampling with PyMC
-                self.logger.info("Starting MCMC sampling with PyMC")
+                self.logger.info("Starting MCMC sampling...")
                 trace = pm.sample(
                     draws=800,
                     tune=500,
-                    chains=2, 
-                    cores=1,  # Using >1 core can cause issues with some GPUs
+                    chains=2,
                     target_accept=0.9,
-                    return_inferencedata=True,
                     compute_convergence_checks=False
                 )
             
@@ -1128,7 +1117,7 @@ class EnhancedBayesianModel:
                     self.logger.info(f"Added {len(X)} rows from {symbol} {timeframe}")
                     
                 except Exception as e:
-                    self.logger.error(f"Error processing {symbol} {timeframe}: {str(e)}")
+                    self.logger.error(f"EBMLOG. Error processing {symbol} {timeframe}: {str(e)}")
                     import traceback
                     self.logger.error(traceback.format_exc())
                     continue

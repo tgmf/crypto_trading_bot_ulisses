@@ -23,13 +23,6 @@ from sklearn.model_selection import TimeSeriesSplit
 import pickle
 import json
 import matplotlib.pyplot as plt
-import os
-os.environ["PYTENSOR_FLAGS"] = "mode=FAST_COMPILE"
-import pytensor
-pytensor.config.compute_test_value = "off"
-
-# pytensor.config.mode = 'NUMBA'
-
 class BayesianModel:
     """
     Bayesian model for trading signals using ordered logistic regression
@@ -53,6 +46,9 @@ class BayesianModel:
         self.model = None
         self.trace = None
         self.scaler = StandardScaler()
+        
+        # Track if we're using JAX acceleration (set by factory)
+        self.using_jax_acceleration = False
         
         # Extract model parameters from config
         self.fee_rate = self.config.get('backtesting', {}).get('fee_rate', 0.0006)
@@ -82,6 +78,7 @@ class BayesianModel:
         Returns:
             ndarray: Array of target values (-1, 0, or 1)
         """
+        # Your existing target creation code remains unchanged
         n_samples = len(df)
         targets = np.zeros(n_samples)
         
@@ -94,16 +91,14 @@ class BayesianModel:
             future_prices = df['close'].iloc[i+1:i+forward_window+1].values
             
             # Calculate potential returns for long positions
-            # Formula: (exit_price / entry_price) - 1 - fees
             long_returns = future_prices / entry_price - 1 - fee_cost
             max_long_return = np.max(long_returns) if len(long_returns) > 0 else -np.inf
             
             # Calculate potential returns for short positions
-            # Formula: 1 - (exit_price / entry_price) - fees
             short_returns = 1 - (future_prices / entry_price) - fee_cost
             max_short_return = np.max(short_returns) if len(short_returns) > 0 else -np.inf
             
-            # Determine the optimal trade direction based on maximum potential return
+            # Determine the optimal trade direction
             if max_long_return >= self.min_profit and max_long_return > max_short_return:
                 targets[i] = 1  # Long opportunity
             elif max_short_return >= self.min_profit and max_short_return > max_long_return:
@@ -128,76 +123,35 @@ class BayesianModel:
         Returns:
             tuple: (model, trace) - PyMC model and sampling trace
         """
+        # Note: This method might be replaced by the factory if JAX acceleration is available
+        # But we keep the original implementation for fallback
+        
         # Adjust y_train to be 0, 1, 2 instead of -1, 0, 1 for ordered logistic
         y_train_adj = y_train + 1
-        
-        # Check the unique classes in the adjusted target
-        unique_classes = np.unique(y_train_adj)
-        n_classes = len(unique_classes)
-        
-        # Check if GPU is available for sampling
-        gpu_available = False
-        try:
-            # First check if we can use GPU with PyTensor directly
-            import pytensor
-            
-            # Check if CUDA is available
-            if hasattr(pytensor.config, 'device'):
-                gpu_available = pytensor.config.device.startswith('cuda') or pytensor.config.device.startswith('gpu')
-                self.logger.info(f"PyTensor device config: {pytensor.config.device}")
-            else:
-                # Alternative check for older versions
-                gpu_available = pytensor.config.device_arg.startswith('cuda') or pytensor.config.device_arg.startswith('gpu')
-                self.logger.info(f"PyTensor device_arg: {pytensor.config.device_arg}")
-                
-            if gpu_available:
-                self.logger.info("PyTensor GPU acceleration available")
-            else:
-                self.logger.info("PyTensor GPU not detected, falling back to CPU")
-                
-        except Exception as e:
-            self.logger.warning(f"Error checking PyTensor GPU: {str(e)}")
         
         # Create PyMC model
         with pm.Model() as model:
             # Priors for unknown model parameters
-            # For ordered logistic, we need n_classes-1 cutpoints
-            alpha = pm.Normal("alpha", mu=0, sigma=10, shape=n_classes-1)
-            
-            # Coefficients for each feature
+            alpha = pm.Normal("alpha", mu=0, sigma=10, shape=2)
             betas = pm.Normal("betas", mu=0, sigma=2, shape=X_train.shape[1])
             
-            # Linear predictor - dot product of features and coefficients
+            # Linear predictor
             eta = pm.math.dot(X_train, betas)
             
             # Ordered logistic regression likelihood
             p = pm.OrderedLogistic("p", eta=eta, cutpoints=alpha, observed=y_train_adj)
             
-            # Sample from the posterior distribution with GPU if available
-            if gpu_available:
-                # If PyTensor GPU is available, use PyMC's standard sampler
-                self.logger.info("Starting GPU-accelerated sampling with PyMC")
-                trace = pm.sample(
-                    draws=800,
-                    tune=500,
-                    chains=2,
-                    cores=1,
-                    target_accept=0.9,
-                    return_inferencedata=True,
-                    compute_convergence_checks=False
-                )
-                self.logger.info("GPU sampling completed successfully")
-            else:
-                self.logger.info("Using CPU sampling with PyMC NUTS")
-                trace = pm.sample(
-                    draws=800,
-                    tune=500,
-                    chains=1,
-                    cores=1,
-                    target_accept=0.9,
-                    return_inferencedata=True,
-                    compute_convergence_checks=False
-                )
+            # Sample from the posterior distribution
+            self.logger.info("Starting MCMC sampling with standard PyMC backend")
+            trace = pm.sample(
+                draws=800,
+                tune=500,
+                chains=2,
+                cores=1,
+                target_accept=0.9,
+                return_inferencedata=True,
+                compute_convergence_checks=False
+            )
         
         self.model = model
         self.trace = trace
@@ -1054,7 +1008,7 @@ class BayesianModel:
                     self.logger.info(f"Added {len(X)} rows from {symbol} {timeframe}")
                     
                 except Exception as e:
-                    self.logger.error(f"Error processing {symbol} {timeframe}: {str(e)}")
+                    self.logger.error(f"BMLOG. Error processing {symbol} {timeframe}: {str(e)}")
                     import traceback
                     self.logger.error(traceback.format_exc())
                     continue

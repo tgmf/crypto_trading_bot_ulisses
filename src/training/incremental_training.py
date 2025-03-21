@@ -19,14 +19,6 @@ sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from src.models.model_factory import ModelFactory
 
-# Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler()
-    ]
-)
 logger = logging.getLogger(__name__)
 
 def load_config(config_file='config/config.yaml'):
@@ -163,7 +155,7 @@ def train_incrementally(symbol, timeframe, exchange, model_type, chunk_size=5000
             model.save_model(exchange, symbol, timeframe, suffix=f"_chunk{chunk_idx+1}")
             
         except Exception as e:
-            logger.error(f"Error processing chunk {chunk_idx+1}: {str(e)}")
+            logger.error(f"ITLOG. Error processing chunk {chunk_idx+1}: {str(e)}")
             import traceback
             logger.error(traceback.format_exc())
             # Continue with next chunk

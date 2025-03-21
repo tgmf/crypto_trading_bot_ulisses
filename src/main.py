@@ -5,12 +5,38 @@
 Main entry point for the trading bot application.
 """
 
-import argparse  # For parsing command-line arguments
 import logging  # For logging messages
 import sys  # For system-specific parameters and functions
 import yaml  # For parsing YAML configuration files
 from pathlib import Path  # For handling file system paths
 
+def setup_logging():
+    """Configure logging settings"""
+    # Ensure logs directory exists
+    logs_dir = Path("logs")
+    logs_dir.mkdir(exist_ok=True)
+    
+    # Reset the root logger
+    root_logger = logging.getLogger()
+    if root_logger.handlers:
+        for handler in root_logger.handlers[:]:
+            root_logger.removeHandler(handler)
+            
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', # Define the log message format
+        handlers=[
+            logging.FileHandler("logs/trading_bot.log"),  # Log messages to a file
+            logging.StreamHandler(sys.stdout)  # Also log messages to the console
+        ]
+    )
+    return logging.getLogger(__name__)
+
+# Configure logging before any other imports
+logger = setup_logging()
+
+import argparse  # For parsing command-line arguments
+import yaml  # For parsing YAML configuration files
 # Importing necessary modules from the project
 from src.data.data_collector import DataCollector
 from src.features.feature_engineering import FeatureEngineer
@@ -18,24 +44,13 @@ from src.models.model_factory import ModelFactory
 from src.backtesting.backtest_engine import BacktestEngine
 from src.backtesting.walk_forward_tester import WalkForwardTester
 
-def setup_logging():
-    """Configure logging settings"""
-    logging.basicConfig(
-        level=logging.INFO, # Set the logging level to INFO
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', # Define the log message format
-        handlers=[
-            logging.FileHandler("logs/trading_bot.log"),  # Log messages to a file
-            logging.StreamHandler(sys.stdout)  # Also log messages to the console
-        ]
-    )
-
 def load_config(config_path):
     """Load configuration from YAML file"""
     with open(config_path, 'r') as file:
         return yaml.safe_load(file) # Parse the YAML file and return the configuration as a dictionary
 
 def main():
-    """Main function to run the trading bot"""
+    """Main function to run the trading bot"""    
     parser = argparse.ArgumentParser(description='Cryptocurrency Trading Bot')
     parser.add_argument('--config', type=str, default='config/config.yaml',
                         help='Path to configuration file')  # Argument for specifying the config file path
@@ -69,11 +84,7 @@ def main():
                         help='Proportion of data to use for testing (0.0-1.0)')  # Argument for specifying test size
     args = parser.parse_args()  # Parse the command-line arguments
     
-    # Setup logging
-    setup_logging()
-    logger = logging.getLogger(__name__)  # Create a logger for this module
     logger.info(f"Starting trading bot in {args.mode} mode")  # Log the starting mode
-    
     # Load configuration
     config = load_config(args.config)  # Load the configuration from the specified file
     logger.info(f"Loaded configuration from {args.config}")  # Log the loaded configuration file

@@ -958,7 +958,7 @@ class TFBayesianModel:
                     self.logger.info(f"Added {len(X)} rows from {symbol} {timeframe}")
                     
                 except Exception as e:
-                    self.logger.error(f"Error processing {symbol} {timeframe}: {str(e)}")
+                    self.logger.error(f"TFBMLOG. Error processing {symbol} {timeframe}: {str(e)}")
                     import traceback
                     self.logger.error(traceback.format_exc())
                     continue

@@ -17,8 +17,6 @@ from pathlib import Path
 import json
 from datetime import datetime
 
-logging.basicConfig(level=logging.INFO)
-
 class QuantumPositionSizer:
     """
     Implements quantum-inspired position sizing based on probability distributions

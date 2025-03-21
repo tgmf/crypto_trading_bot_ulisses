@@ -105,15 +105,11 @@ case "$COMMAND" in
     echo "Running development environment in Docker..."
     docker-compose run --rm trading_bot bash
     ;;
-  incremental-gpu)
-    echo "Training incrementally on large dataset with FORCED GPU..."
+  incremental)
+    echo "Training incrementally on large dataset with GPU acceleration..."
     
-    # Basic thread configuration
-    export OMP_NUM_THREADS=1
-    export MKL_NUM_THREADS=1
-    
-    # First force GPU configuration, then run training script
-    python -m src.utils.gpu_config && python -m src.training.incremental_training $OPTIONS
+    # Run with GPU configuration utility
+    python -m src.training.incremental_training $OPTIONS
     ;;
   notebook)
     echo "Launching Jupyter notebook..."
@@ -121,6 +117,8 @@ case "$COMMAND" in
     ;;
   train)
     echo "Training model..."
+    export PYTENSOR_FLAGS="device=cuda,floatX=float32"
+    ulimit -m 18000000  # Limit memory usage to 8GB
     python -m src.main --mode train $OPTIONS
     ;;
   help|*)

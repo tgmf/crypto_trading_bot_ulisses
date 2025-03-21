@@ -441,12 +441,6 @@ def main():
     parser.add_argument('--no-plot', action='store_true', help='Skip plotting')
     args = parser.parse_args()
     
-    # Configure logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-    
     analyzer = BacktestAnalyzer()
     
     # Determine file to analyze
