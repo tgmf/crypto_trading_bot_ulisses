@@ -21,15 +21,11 @@ from datetime import datetime
 # Add project root to path to allow imports
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
-from src.models.model_factory import ModelFactory
+from ..models.model_factory import ModelFactory
+from ..utils.config_loader import ConfigLoader
 
 logger = logging.getLogger(__name__)
 
-def load_config(config_file='config/config.yaml'):
-    """Load configuration from YAML file"""
-    with open(config_file, 'r') as file:
-        config = yaml.safe_load(file)
-    return config
 
 def get_memory_usage():
     """Get current memory usage in MB"""
@@ -54,9 +50,7 @@ def clear_memory():
     time.sleep(1)
 
 
-def train_incrementally(symbol="BTC/USDT", timeframe="15m", exchange="binance", model_type="enhanced_bayesian", 
-                        chunk_size=50000, test_size=0.001, overlap=0, max_memory_mb=None, 
-                        checkpoint_frequency=1, resume_from=None):
+def train_incrementally(**kwargs):
     """
     Train a model incrementally on historical data
     
@@ -68,20 +62,52 @@ def train_incrementally(symbol="BTC/USDT", timeframe="15m", exchange="binance", 
         chunk_size: Number of samples per training chunk
         test_size: Proportion of data to reserve for final testing
         overlap: Number of samples to overlap between chunks for continuity
+        max_memory_mb: Maximum memory usage in MB before emergency cleanup
+        checkpoint_frequency: Save model checkpoint every N chunks
+        resume_from: Resume training from specific chunk index
     """
     # Load configuration
-    config = load_config()
+    config_loader = ConfigLoader()
     
-    # Add memory management settings to config
-    if 'training' not in config:
-        config['training'] = {}
-    config['training']['memory_efficient'] = True
+    # Set all parameters with defaults from config
+    params = {
+        'symbol': config_loader.get('incremental_training', 'symbol', default='BTC/USDT'),
+        'timeframe': config_loader.get('incremental_training', 'timeframe', default='15m'),
+        'exchange': config_loader.get('incremental_training', 'exchange', default='binance'),
+        'model_type': config_loader.get('incremental_training', 'model_type', default='enhanced_bayesian'),
+        'chunk_size': config_loader.get('incremental_training', 'chunk_size', default=50000),
+        'test_size': config_loader.get('incremental_training', 'test_size', default=0.001),
+        'overlap': config_loader.get('incremental_training', 'overlap', default=2500),
+        'max_memory_mb': config_loader.get('incremental_training', 'max_memory_mb', default=8000),
+        'checkpoint_frequency': config_loader.get('incremental_training', 'checkpoint_frequency', default=1),
+        'resume_from': config_loader.get('incremental_training', 'resume_from', default=None)
+    }
     
-    # Temporarily override the model type in the config
-    original_model_type = config.get('model', {}).get('type', 'auto')
-    if 'model' not in config:
-        config['model'] = {}
-    config['model']['type'] = model_type
+    # Override with passed arguments
+    for key, value in kwargs.items():
+        if key in params and value is not None:
+            params[key] = value
+    
+    # Extract parameters for clarity in the rest of the function
+    symbol = params['symbol']
+    timeframe = params['timeframe']
+    exchange = params['exchange']
+    model_type = params['model_type']
+    chunk_size = params['chunk_size']
+    test_size = params['test_size']
+    overlap = params['overlap']
+    max_memory_mb = params['max_memory_mb']
+    checkpoint_frequency = params['checkpoint_frequency']
+    resume_from = params['resume_from']
+    
+    # Store original model type
+    original_model_type = config_loader.get('model', 'type', default='auto')
+    
+    # Update config with memory settings and model type
+    config_loader.update_config({
+        'training': {'memory_efficient': True},
+        'model': {'type': model_type}
+    })
     
     # Prepare paths
     symbol_safe = symbol.replace('/', '_')
@@ -93,7 +119,7 @@ def train_incrementally(symbol="BTC/USDT", timeframe="15m", exchange="binance", 
     
     # Create logs directory for this training run
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_dir = Path(f"logs/incremental_training/{exchange}/{symbol_safe}/{timeframe}/{timestamp}")
+    log_dir = Path(f"logs/incremental_training/{symbol_safe}/{timeframe}/{timestamp}")
     log_dir.mkdir(parents=True, exist_ok=True)
     
     # Log initial memory usage
@@ -151,6 +177,7 @@ def train_incrementally(symbol="BTC/USDT", timeframe="15m", exchange="binance", 
         total_rows -= test_size_rows
     else:
         logger.info("No separate test set created (test_size too small)")
+        test_size_rows = 0  # Ensure test_size_rows is defined even when no test set is created
     
     # Initialize model when needed to avoid memory usage
     model = None
@@ -165,15 +192,15 @@ def train_incrementally(symbol="BTC/USDT", timeframe="15m", exchange="binance", 
         logger.info(f"Resuming from chunk {start_chunk}")
         
         # Check if model exists from previous run
-        model_path = Path(f"models/{exchange}/{symbol_safe}/{timeframe}/{model_type}_chunk{start_chunk-1}.pkl")
+        model_path = Path(f"models/{symbol_safe}/{timeframe}/{model_type}_chunk{start_chunk-1}.pkl")
         if model_path.exists():
             # Initialize model factory
-            model_factory = ModelFactory(config)
+            model_factory = ModelFactory(config_loader.get_config())
             model = model_factory.create_model()
             
             # Load the model state
             logger.info(f"Loading model state from {model_path}")
-            model.load_model(exchange, symbol, timeframe, suffix=f"_chunk{start_chunk-1}")
+            model.load_model(symbol, timeframe, suffix=f"_chunk{start_chunk-1}")
             logger.info("Model loaded successfully")
         else:
             logger.warning(f"No model found at {model_path}, starting fresh")
@@ -184,7 +211,8 @@ def train_incrementally(symbol="BTC/USDT", timeframe="15m", exchange="binance", 
         # Update status file
         with open(status_file, 'a') as f:
             f.write(f"Starting chunk {chunk_idx+1}/{num_chunks} at {datetime.now().strftime('%H:%M:%S')}\n")
-            
+        
+        # Calculate chunk boundaries    
         start_row = chunk_idx * effective_chunk_size + 1  # +1 to skip header
         end_row = min(start_row + chunk_size - 1, total_rows)
         
@@ -207,8 +235,8 @@ def train_incrementally(symbol="BTC/USDT", timeframe="15m", exchange="binance", 
                 'volume': np.float32
             }
             
-            chunk_df = pd.read_csv(data_file, skiprows=skiprows, index_col='timestamp', 
-                                 parse_dates=True, dtype=dtype_dict)
+            chunk_df = pd.read_csv(data_file, skiprows=skiprows, nrows=chunk_size, index_col='timestamp', 
+                                    parse_dates=True, dtype=dtype_dict)
             logger.info(f"Loaded chunk with {len(chunk_df):,} rows")
             
             # Sort by timestamp to ensure chronological order
@@ -234,7 +262,7 @@ def train_incrementally(symbol="BTC/USDT", timeframe="15m", exchange="binance", 
             if model is None:
                 logger.info("Initializing model...")
                 # Initialize model factory
-                model_factory = ModelFactory(config)
+                model_factory = ModelFactory(config_loader.get_config())
                 model = model_factory.create_model()
                 logger.info(f"Model {model_type} initialized")
             
@@ -248,7 +276,7 @@ def train_incrementally(symbol="BTC/USDT", timeframe="15m", exchange="binance", 
             else:
                 logger.info("Continuing training on next chunk")
                 # Continue training with this chunk
-                model.continue_training(new_data_df=chunk_df, exchange=exchange, 
+                model.continue_training(new_data_df=chunk_df, 
                                         symbol=symbol, timeframe=timeframe)
             
             # Free dataframe memory after training
@@ -257,7 +285,12 @@ def train_incrementally(symbol="BTC/USDT", timeframe="15m", exchange="binance", 
             # Save checkpoint if needed
             if (chunk_idx + 1) % checkpoint_frequency == 0 or chunk_idx == num_chunks - 1:
                 logger.info(f"Saving checkpoint after chunk {chunk_idx+1}")
-                model.save_model(exchange, symbol, timeframe, suffix=f"_chunk{chunk_idx+1}")
+                model.save_model(symbol, timeframe, 
+                                    suffix=f"chunk{chunk_idx+1}")
+                
+                # Clean up old checkpoints
+                cleanup_old_checkpoints(symbol, timeframe, model_type, 
+                                        current_chunk=chunk_idx+1, max_to_keep=2)
                 
                 # Update status file
                 with open(status_file, 'a') as f:
@@ -274,18 +307,18 @@ def train_incrementally(symbol="BTC/USDT", timeframe="15m", exchange="binance", 
                 logger.warning(f"Memory usage ({mem_after:.2f} MB) approaching limit ({max_memory_mb} MB)")
                 logger.info("Performing emergency memory cleanup...")
                 
-                # Save model state
+                # Save model state with latest emergency tag
                 emergency_suffix = f"_emergency_chunk{chunk_idx+1}"
-                model.save_model(exchange, symbol, timeframe, suffix=emergency_suffix)
+                model.save_model(symbol, timeframe, suffix=emergency_suffix)
                 
                 # Clear model from memory
                 del model
                 clear_memory()
                 
                 # Reload model (creates fresh instance)
-                model_factory = ModelFactory(config)
+                model_factory = ModelFactory(config_loader.get_config())
                 model = model_factory.create_model()
-                model.load_model(exchange, symbol, timeframe, suffix=emergency_suffix)
+                model.load_model(symbol, timeframe, suffix=emergency_suffix)
                 
                 logger.info(f"Model reloaded after emergency cleanup. New memory: {get_memory_usage():.2f} MB")
             
@@ -308,7 +341,7 @@ def train_incrementally(symbol="BTC/USDT", timeframe="15m", exchange="binance", 
             if model is not None:
                 try:
                     error_suffix = f"_error_chunk{chunk_idx+1}"
-                    model.save_model(exchange, symbol, timeframe, suffix=error_suffix)
+                    model.save_model(symbol, timeframe, suffix=error_suffix)
                     logger.info(f"Saved model state before error at {error_suffix}")
                 except Exception as save_error:
                     logger.error(f"Could not save model state: {save_error}")
@@ -321,7 +354,7 @@ def train_incrementally(symbol="BTC/USDT", timeframe="15m", exchange="binance", 
     
     # Final save with standard name
     if model is not None:
-        model.save_model(exchange, symbol, timeframe)
+        model.save_model(symbol, timeframe)
         logger.info("Final model saved")
     
     # Update status file
@@ -332,6 +365,47 @@ def train_incrementally(symbol="BTC/USDT", timeframe="15m", exchange="binance", 
     
     logger.info("Incremental training complete")
     return True
+
+# Cleanup old checkpoints
+def cleanup_old_checkpoints(symbol, timeframe, model_type, current_chunk, max_to_keep=2):
+    """Remove old checkpoints to save disk space"""
+    symbol_safe = symbol.replace('/', '_')
+    model_dir = Path(f"models/{symbol_safe}/{timeframe}/{model_type}")
+    
+    if not model_dir.exists():
+        return
+        
+    # Find all checkpoint files for this model with chunk in their name
+    checkpoint_files = []
+    for suffix in ['_scaler.pkl', '_trace.netcdf', '_feature_cols.pkl', '_metrics.json']:
+        checkpoint_files.extend(list(model_dir.glob(f"*chunk*{suffix}")))
+    
+    # Group by chunk number
+    chunk_groups = {}
+    for file in checkpoint_files:
+        # Extract chunk number from filename
+        for part in file.stem.split('_'):
+            if part.startswith('chunk'):
+                chunk_num = int(part[5:])  # Extract number after "chunk"
+                if chunk_num != current_chunk:  # Don't delete current chunk
+                    if chunk_num not in chunk_groups:
+                        chunk_groups[chunk_num] = []
+                    chunk_groups[chunk_num].append(file)
+                break
+    
+    # Get list of chunks sorted by number (oldest first)
+    chunks_to_delete = sorted(chunk_groups.keys())
+    
+    # Keep only the N most recent chunks
+    if len(chunks_to_delete) > max_to_keep:
+        # Delete the oldest chunks beyond our keep limit
+        for chunk_num in chunks_to_delete[:-max_to_keep]:
+            for file in chunk_groups[chunk_num]:
+                logger.info(f"Removing old checkpoint file: {file}")
+                try:
+                    file.unlink()
+                except Exception as e:
+                    logger.warning(f"Could not delete {file}: {e}")
 
 def main():
     """Main function for incremental training script"""

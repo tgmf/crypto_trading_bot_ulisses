@@ -23,6 +23,7 @@ from sklearn.model_selection import TimeSeriesSplit
 import pickle
 import json
 import matplotlib.pyplot as plt
+from datetime import datetime
 from ..utils.result_logger import ResultLogger
 class BayesianModel:
     """
@@ -146,8 +147,8 @@ class BayesianModel:
             self.logger.info("Starting MCMC sampling with standard PyMC backend")
             trace = pm.sample(
                 draws=800,
-                tune=500,
-                chains=2,
+                tune=1000,
+                chains=4,
                 cores=1,
                 target_accept=0.9,
                 return_inferencedata=True,
@@ -236,7 +237,7 @@ class BayesianModel:
             self.build_model(X_train_scaled, y_train)
             
             # Save model
-            self.save_model(exchange, symbol, timeframe)
+            self.save_model(symbol, timeframe)
             
             return train_df, test_df
             
@@ -357,7 +358,7 @@ class BayesianModel:
                     p = pm.OrderedLogistic("p", eta=eta, cutpoints=alpha, observed=y_train_adj)
                     
                     # Sample from the posterior
-                    trace = pm.sample(1000, tune=1000, chains=2, cores=1, return_inferencedata=True)
+                    trace = pm.sample(1000, tune=1000, chains=4, cores=1, return_inferencedata=True)
                 
                 # Evaluate on training data
                 train_preds = self._predict_class(X_train_fold_scaled, trace)
@@ -396,10 +397,10 @@ class BayesianModel:
             self.build_model(X_all_scaled, y_all)
             
             # 6. Save model
-            self.save_model(exchange, symbol, timeframe)
+            self.save_model(symbol, timeframe)
             
             # Plot CV performance
-            self._plot_cv_results(cv_results, exchange, symbol, timeframe)
+            self._plot_cv_results(cv_results, symbol, timeframe)
             
             return train_val_df, test_df, cv_results
             
@@ -490,7 +491,7 @@ class BayesianModel:
                 self.build_model(X_train_scaled, y_train)
                 
                 # Save original model
-                self.save_model(exchange, symbol, timeframe)
+                self.save_model(symbol, timeframe)
                 self.logger.info("Original model trained and saved")
             
             # Now for the reversed training
@@ -518,14 +519,14 @@ class BayesianModel:
             self.build_model(X_train_reversed_scaled, y_train_reversed)
             
             # Save reversed model with indicator
-            self.save_model(exchange, symbol, f"{timeframe}_reversed")
+            self.save_model(symbol, timeframe, suffix="_reversed")
             
             # Evaluate original and reversed models
             self.logger.info("Evaluating both models for comparison")
             
             # Load the original model for comparison
             original_model = self.__class__(self.config)
-            original_model.load_model(exchange, symbol, timeframe)
+            original_model.load_model(symbol, timeframe)
             
             # Test original model on original test set
             X_orig_test = test_df[self.feature_cols].values
@@ -562,7 +563,7 @@ class BayesianModel:
             }
             
             # Save comparison metrics
-            metrics_dir = Path(f"models/comparisons/{exchange}/{symbol_safe}")
+            metrics_dir = Path(f"models/comparisons/{symbol_safe}/{timeframe}")
             metrics_dir.mkdir(parents=True, exist_ok=True)
             
             metrics_file = metrics_dir / f"{timeframe}_consistency_metrics.json"
@@ -570,7 +571,7 @@ class BayesianModel:
                 json.dump(comparison_metrics, f, indent=4)
             
             # Create visualization of model consistency
-            self._plot_model_consistency(comparison_metrics, exchange, symbol, timeframe)
+            self._plot_model_consistency(comparison_metrics, symbol, timeframe)
             
             # Log summary
             self.logger.info(f"Model consistency evaluation complete:")
@@ -595,106 +596,252 @@ class BayesianModel:
             self.logger.error(traceback.format_exc())
             return False
 
-    def save_model(self, exchange, symbol, timeframe, suffix=None):
+    def save_model(self, symbol, timeframe, comment=None, suffix=None):
         """
-        Save the trained model
+        Save the trained model with improved directory structure
         
-        Saves all components needed for prediction:
-        - Scaler for feature normalization
-        - Trace (posterior samples) from PyMC
-        - Feature column list
+        Saves all components needed for prediction using a structured path format:
+        models/{symbol_safe}/{timeframe}/{model_type}/{datetime}_{comment}_{suffix}.{ext}
         
         Args:
-            exchange (str): Exchange name
             symbol (str): Trading pair symbol
             timeframe (str): Data timeframe
+            comment (str, optional): User comment to identify purpose
+            suffix (str, optional): Additional identifier for special versions
             
         Returns:
             bool: True if successful, False otherwise
         """
         try:
-            # Create directory
-            model_dir = Path("models")
-            model_dir.mkdir(exist_ok=True)
-            
             # Create safe path elements
+            model_type = self.__class__.__name__.lower()
             symbol_safe = symbol.replace('/', '_')
-        
-            # Add suffix if provided
-            filename_base = f"{exchange}_{symbol_safe}_{timeframe}"
+            
+            # Create timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            # Create base directory structure
+            model_dir = Path(f"models/{symbol_safe}/{timeframe}/{model_type}")
+            model_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Create base filename with optional elements
+            filename_parts = [timestamp]
+            if comment:
+                # Sanitize comment for safe filename use
+                sanitized_comment = comment.replace(' ', '_')
+                sanitized_comment = ''.join(c for c in sanitized_comment if c.isalnum() or c in '_-')
+                if sanitized_comment:  # Only add if we have something after sanitizing
+                    filename_parts.append(sanitized_comment)
             if suffix:
-                filename_base += f"{suffix}"
+                # Sanitize suffix as well just to be safe
+                sanitized_suffix = suffix.replace(' ', '_')
+                sanitized_suffix = ''.join(c for c in sanitized_suffix if c.isalnum() or c in '_-')
+                if sanitized_suffix:
+                    filename_parts.append(sanitized_suffix)
+            
+            filename_base = "_".join(filename_parts)
+            
+            # Paths for components
+            scaler_path = model_dir / f"{filename_base}_scaler.pkl"
+            trace_path = model_dir / f"{filename_base}_trace.netcdf"
+            feat_cols_path = model_dir / f"{filename_base}_feature_cols.pkl"
+            metrics_path = model_dir / f"{filename_base}_metrics.json"
             
             # Save scaler
-            scaler_path = model_dir / f"{filename_base}_scaler.pkl"
             with open(scaler_path, 'wb') as f:
                 pickle.dump(self.scaler, f)
             
             # Save trace (posterior samples) if available
-            if self.trace is not None:
-                trace_path = model_dir / f"{filename_base}_trace.netcdf"
+            if hasattr(self, 'trace') and self.trace is not None:
                 az.to_netcdf(self.trace, trace_path)
             
             # Save feature columns list
-            feat_cols_path = model_dir / f"{filename_base}_feature_cols.pkl"
             with open(feat_cols_path, 'wb') as f:
                 pickle.dump(self.feature_cols, f)
             
-            self.logger.info(f"Model saved to {model_dir}")
-            return True
+            # Save additional metrics if available
+            metrics = {}
+            if hasattr(self, 'metrics'):
+                metrics = self.metrics
+            
+            # Add metadata to metrics
+            metrics['saved_at'] = datetime.now().isoformat()
+            metrics['model_type'] = model_type
+            metrics['symbol'] = symbol
+            metrics['timeframe'] = timeframe
+            metrics['comment'] = comment
+            
+            with open(metrics_path, 'w') as f:
+                json.dump(metrics, f, indent=2)
+            
+            # Create a symlink to the latest model
+            latest_scaler = model_dir / f"latest_scaler.pkl"
+            latest_trace = model_dir / f"latest_trace.netcdf"
+            latest_feat_cols = model_dir / f"latest_feature_cols.pkl"
+            latest_metrics = model_dir / f"latest_metrics.json"
+            
+            # Remove existing symlinks if they exist
+            for path in [latest_scaler, latest_trace, latest_feat_cols, latest_metrics]:
+                if path.exists():
+                    path.unlink()
+            
+            # Create new symlinks
+            latest_scaler.symlink_to(scaler_path.name)
+            latest_trace.symlink_to(trace_path.name)
+            latest_feat_cols.symlink_to(feat_cols_path.name)
+            latest_metrics.symlink_to(metrics_path.name)
+            
+            # Verify symlinks
+            if not latest_scaler.exists() or latest_scaler.stat().st_size == 0:
+                self.logger.warning(f"Symlink verification failed for {latest_scaler}. Attempting absolute path.")
+                latest_scaler.unlink()
+                latest_scaler.symlink_to(scaler_path.absolute())
+                
+            if not latest_trace.exists() or latest_trace.stat().st_size == 0:
+                self.logger.warning(f"Symlink verification failed for {latest_trace}. Attempting absolute path.")
+                latest_trace.unlink()
+                latest_trace.symlink_to(trace_path.absolute())
+                
+            if not latest_feat_cols.exists() or latest_feat_cols.stat().st_size == 0:
+                self.logger.warning(f"Symlink verification failed for {latest_feat_cols}. Attempting absolute path.")
+                latest_feat_cols.unlink()
+                latest_feat_cols.symlink_to(feat_cols_path.absolute())
+                
+            if not latest_metrics.exists() or latest_metrics.stat().st_size == 0:
+                self.logger.warning(f"Symlink verification failed for {latest_metrics}. Attempting absolute path.")
+                latest_metrics.unlink()
+                latest_metrics.symlink_to(metrics_path.absolute())
+                
+            # Final verification
+            symlink_success = all([
+                latest_scaler.exists(), 
+                latest_trace.exists(), 
+                latest_feat_cols.exists(), 
+                latest_metrics.exists()
+            ])
+            
+            if not symlink_success:
+                self.logger.warning("Some symlinks could not be created properly.")
+            
+            self.logger.info(f"Model saved to {model_dir}/{filename_base}")
+            return True, filename_base
             
         except Exception as e:
             self.logger.error(f"Error saving model: {str(e)}")
-            return False
-    
-    def load_model(self, exchange, symbol, timeframe, suffix=None):
+            import traceback
+            self.logger.error(traceback.format_exc())
+            return False, None
+
+    def load_model(self, symbol, timeframe, timestamp=None, 
+                comment=None, suffix=None, version='latest'):
         """
-        Load a trained model
+        Load a trained model with flexible path resolution
         
-        Loads all components needed for prediction:
-        - Scaler for feature normalization
-        - Trace (posterior samples) from PyMC
-        - Feature column list (if available)
+        This method can load models from either:
+        1. The new structured directory format
+        2. The legacy flat format for backward compatibility
+        3. Latest version using 'latest' symlinks
+        4. Specific version by providing timestamp/comment/suffix
         
         Args:
-            exchange (str): Exchange name
             symbol (str): Trading pair symbol
             timeframe (str): Data timeframe
+            timestamp (str, optional): Timestamp to filter by
+            comment (str, optional): Comment to filter by
+            suffix (str, optional): Suffix to filter by
+            version (str, optional): 'latest' or 'specific'. If 'latest', other filters 
+                                    are ignored and latest version is loaded
             
         Returns:
             bool: True if successful, False otherwise
         """
         try:
-            # Create paths
-            model_dir = Path("models")
+            # Create safe symbol name for paths
             symbol_safe = symbol.replace('/', '_')
+            model_type = self.__class__.__name__.lower()
+            
+            # Try the new directory structure first
+            model_dir = Path(f"models/{symbol_safe}/{timeframe}/{model_type}")
         
-            # Add suffix if provided
-            filename_base = f"{exchange}_{symbol_safe}_{timeframe}"
-            if suffix:
-                filename_base += f"{suffix}"
+            if not model_dir.exists():
+                self.logger.error(f"Model directory not found: {model_dir}")
+                return False
             
-            scaler_path = model_dir / f"{exchange}_{symbol_safe}_{timeframe}_scaler.pkl"
-            trace_path = model_dir / f"{exchange}_{symbol_safe}_{timeframe}_trace.netcdf"
-            feat_cols_path = model_dir / f"{exchange}_{symbol_safe}_{timeframe}_feature_cols.pkl"
-
-            # Load scaler
-            with open(scaler_path, 'rb') as f:
-                self.scaler = pickle.load(f)
+            found_model = False
+            model_files = {}
             
-            # Load trace
-            self.trace = az.from_netcdf(trace_path)
+            # If version is 'latest', try to load the latest symlinks
+            if version == 'latest':
+                scaler_path = model_dir / "latest_scaler.pkl"
+                trace_path = model_dir / "latest_trace.netcdf" 
+                feat_cols_path = model_dir / "latest_feature_cols.pkl"
+                
+                if scaler_path.exists() and trace_path.exists():
+                    model_files = {
+                        'scaler': scaler_path,
+                        'trace': trace_path,
+                        'feat_cols': feat_cols_path
+                    }
+                    found_model = True
+                    self.logger.info(f"Loading latest model from {model_dir}")
             
-            # Load feature columns if available
-            if feat_cols_path.exists():
-                with open(feat_cols_path, 'rb') as f:
-                    self.feature_cols = pickle.load(f)
+            # Otherwise look for a specific version using filters
+            elif version == 'specific' and any([timestamp, comment, suffix]):
+                # Build a pattern to match against
+                pattern_parts = []
+                if timestamp:
+                    pattern_parts.append(timestamp)
+                if comment:
+                    pattern_parts.append(comment.replace(' ', '_'))
+                if suffix:
+                    pattern_parts.append(suffix)
+                
+                # Create pattern - we'll only search for scaler files and then derive the others
+                file_pattern = "_".join(pattern_parts) if pattern_parts else ""
+                
+                # Find all model files that match the pattern
+                all_scalers = list(model_dir.glob(f"*{file_pattern}*_scaler.pkl"))
+                
+                if all_scalers:
+                    # Choose the most recent one by name (which includes timestamp)
+                    scaler_path = sorted(all_scalers)[-1]
+                    base_name = scaler_path.name.replace("_scaler.pkl", "")
+                    
+                    trace_path = model_dir / f"{base_name}_trace.netcdf"
+                    feat_cols_path = model_dir / f"{base_name}_feature_cols.pkl"
+                    
+                    model_files = {
+                        'scaler': scaler_path,
+                        'trace': trace_path,
+                        'feat_cols': feat_cols_path
+                    }
+                    found_model = True
+                    self.logger.info(f"Found specific model: {base_name}")
             
-            self.logger.info(f"Model loaded from {model_dir}")
-            return True
-            
+            # Load the model if found
+            if found_model:
+                # Load scaler
+                with open(model_files['scaler'], 'rb') as f:
+                    self.scaler = pickle.load(f)
+                
+                # Load trace
+                self.trace = az.from_netcdf(model_files['trace'])
+                
+                # Load feature columns if available
+                if model_files['feat_cols'].exists():
+                    with open(model_files['feat_cols'], 'rb') as f:
+                        self.feature_cols = pickle.load(f)
+                
+                self.logger.info(f"Model loaded successfully")
+                return True
+            else:
+                self.logger.error(f"No model found for {symbol} {timeframe} with the specified criteria")
+                return False
+                
         except Exception as e:
             self.logger.error(f"Error loading model: {str(e)}")
+            import traceback
+            self.logger.error(traceback.format_exc())
             return False
     
     def predict_probabilities(self, df_or_X):
@@ -784,7 +931,7 @@ class BayesianModel:
         # Return most likely class
         return np.argmax(probs, axis=1)
     
-    def _plot_cv_results(self, cv_results, exchange, symbol, timeframe):
+    def _plot_cv_results(self, cv_results, symbol, timeframe):
         """
         Plot cross-validation results
         
@@ -794,7 +941,6 @@ class BayesianModel:
         
         Args:
             cv_results (dict): Dictionary with cross-validation results
-            exchange (str): Exchange name
             symbol (str): Trading pair symbol
             timeframe (str): Data timeframe
             
@@ -804,7 +950,8 @@ class BayesianModel:
         try:
             # Create directory for plots if it doesn't exist
             symbol_safe = symbol.replace('/', '_')
-            output_dir = Path(f"models/{exchange}/{symbol_safe}")
+            model_type = self.__class__.__name__.lower()
+            output_dir = Path(f"models/{symbol_safe}/{timeframe}/{model_type}")
             output_dir.mkdir(parents=True, exist_ok=True)
             
             # Create figure
@@ -836,7 +983,8 @@ class BayesianModel:
             plt.grid(True, alpha=0.3)
             
             # Save figure
-            plot_file = output_dir / f"cv_results_{timeframe}.png"
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            plot_file = output_dir / f"cv_results_{timestamp}.png"
             plt.savefig(plot_file)
             plt.close()
             
@@ -847,7 +995,7 @@ class BayesianModel:
             self.logger.error(f"Error plotting CV results: {str(e)}")
             return False
     
-    def _plot_model_consistency(self, metrics, exchange, symbol, timeframe):
+    def _plot_model_consistency(self, metrics, symbol, timeframe):
         """
         Create visualizations of model consistency metrics
         
@@ -857,7 +1005,6 @@ class BayesianModel:
         
         Args:
             metrics (dict): Dictionary with comparison metrics
-            exchange (str): Exchange name
             symbol (str): Trading pair symbol
             timeframe (str): Data timeframe
             
@@ -867,7 +1014,8 @@ class BayesianModel:
         try:
             # Create output directory
             symbol_safe = symbol.replace('/', '_')
-            output_dir = Path(f"data/backtest_results/position_sizing/{exchange}/{symbol_safe}")
+            model_type = self.__class__.__name__.lower()
+            output_dir = Path(f"data/backtest_results/position_sizing/{symbol_safe}/{timeframe}/{model_type}")
             output_dir.mkdir(parents=True, exist_ok=True)
             
             # Create figure with 2 subplots
@@ -930,7 +1078,8 @@ class BayesianModel:
             plt.subplots_adjust(top=0.9)
             
             # Save figure
-            plot_file = output_dir / f"{timeframe}_consistency_plot.png"
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            plot_file = output_dir / f"consistency_plot_{timestamp}.png"
             plt.savefig(plot_file)
             plt.close(fig)
             
@@ -1077,7 +1226,7 @@ class BayesianModel:
             model_name = self._generate_multi_model_name(symbols, timeframes)
             
             # Save model
-            self.save_model_multi(exchange, model_name)
+            self.save_model_multi(model_name)
             
             self.logger.info(f"Multi-symbol model trained and saved successfully")
             return True
@@ -1110,7 +1259,7 @@ class BayesianModel:
             
         return f"multi_{symbols_str}_{timeframes_str}"
 
-    def save_model_multi(self, exchange, model_name):
+    def save_model_multi(self, model_name):
         """
         Save the multi-symbol model
         
@@ -1118,7 +1267,6 @@ class BayesianModel:
         a special naming convention for identification.
         
         Args:
-            exchange (str): Exchange name
             model_name (str): Generated model name
             
         Returns:
@@ -1130,16 +1278,16 @@ class BayesianModel:
             model_dir.mkdir(exist_ok=True)
             
             # Save scaler
-            scaler_path = model_dir / f"{exchange}_{model_name}_scaler.pkl"
+            scaler_path = model_dir / f"{model_name}_scaler.pkl"
             with open(scaler_path, 'wb') as f:
                 pickle.dump(self.scaler, f)
             
             # Save trace (posterior samples)
-            trace_path = model_dir / f"{exchange}_{model_name}_trace.netcdf"
+            trace_path = model_dir / f"{model_name}_trace.netcdf"
             az.to_netcdf(self.trace, trace_path)
             
             # Save feature columns list
-            feat_cols_path = model_dir / f"{exchange}_{model_name}_feature_cols.pkl"
+            feat_cols_path = model_dir / f"{model_name}_feature_cols.pkl"
             with open(feat_cols_path, 'wb') as f:
                 pickle.dump(self.feature_cols, f)
             
@@ -1150,9 +1298,9 @@ class BayesianModel:
             self.logger.error(f"Error saving multi-symbol model: {str(e)}")
             return False
         
-    def continue_training(self, new_data_df, exchange='binance', symbol='BTC/USDT', timeframe='1h'):
+    def continue_training(self, new_data_df, symbol='BTC/USDT', timeframe='1h'):
         """Continue training an existing model with new data"""
-        self.logger.info(f"Continuing training for {exchange} {symbol} {timeframe}")
+        self.logger.info(f"Continuing training for {symbol} {timeframe}")
         
         # Check if a model exists
         if self.trace is None:
@@ -1192,14 +1340,14 @@ class BayesianModel:
                 p = pm.OrderedLogistic("p", eta=eta, cutpoints=alpha, observed=y_new_adj)
                 
                 # Sample
-                new_trace = pm.sample(1000, tune=1000, chains=2, cores=1, return_inferencedata=True)
+                new_trace = pm.sample(1000, tune=1000, chains=4, cores=1, return_inferencedata=True)
             
             # Update the model
             self.model = new_model
             self.trace = new_trace
             
             # Save updated model
-            self.save_model(exchange, symbol, timeframe)
+            self.save_model(symbol, timeframe)
             
             return True
             

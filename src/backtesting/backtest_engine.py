@@ -100,7 +100,7 @@ class BacktestEngine:
             model_factory = ModelFactory(self.config)
             model = model_factory.create_model()
             
-            if not model.load_model(exchange, symbol, timeframe):
+            if not model.load_model(symbol, timeframe):
                 self.logger.error("Failed to load model for backtesting")
                 return False
             
@@ -118,10 +118,10 @@ class BacktestEngine:
             is_test_data = test_file.exists()
             
             # Save results with data source indicator for transparency
-            self._save_backtest_results(backtest_results, stats, exchange, symbol, timeframe, data_source)
+            self._save_backtest_results(backtest_results, stats, symbol, timeframe, data_source)
             
             # Plot results with data source indicator
-            self._plot_backtest_results(backtest_results, exchange, symbol, timeframe, data_source)
+            self._plot_backtest_results(backtest_results, symbol, timeframe, data_source)
             
             return backtest_results, stats
             
@@ -360,23 +360,23 @@ class BacktestEngine:
         
         return df_backtest, stats
     
-    def _save_backtest_results(self, results, stats, exchange, symbol, timeframe, data_source="full_data"):
+    def _save_backtest_results(self, results, stats, symbol, timeframe, data_source="full_data"):
         """Save backtest results to CSV and stats to JSON"""
         try:
             # Create output directory
             symbol_safe = symbol.replace('/', '_')
-            output_dir = Path(f"data/backtest_results/{exchange}/{symbol_safe}")
+            output_dir = Path(f"data/backtest_results/{symbol_safe}/{timeframe}")
             output_dir.mkdir(parents=True, exist_ok=True)
             
             # Generate timestamp
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             
             # Save results with data source indicator
-            results_file = output_dir / f"{timeframe}_{data_source}_{timestamp}.csv"
+            results_file = output_dir / f"{data_source}_{timestamp}.csv"
             results.to_csv(results_file)
             
             # Save stats with data source indicator
-            stats_file = output_dir / f"{timeframe}_{data_source}_{timestamp}_stats.csv"
+            stats_file = output_dir / f"{data_source}_{timestamp}_stats.csv"
             stats_df = pd.DataFrame([stats])
             
             # Add data source information to stats
@@ -390,11 +390,11 @@ class BacktestEngine:
             self.logger.error(f"Error saving backtest results: {str(e)}")
             return False
     
-    def _plot_backtest_results(self, results, exchange, symbol, timeframe, data_source="full_data"):
+    def _plot_backtest_results(self, results, symbol, timeframe, data_source="full_data"):
         """Plot backtest results"""
         try:
             symbol_safe = symbol.replace('/', '_')
-            output_dir = Path(f"data/backtest_results/{exchange}/{symbol_safe}")
+            output_dir = Path(f"data/backtest_results/{symbol_safe}/{timeframe}")
             output_dir.mkdir(parents=True, exist_ok=True)
             
             # Generate timestamp
@@ -451,7 +451,7 @@ class BacktestEngine:
             plt.tight_layout()
             
             # Save figure
-            plot_file = output_dir / f"{timeframe}_{data_source}_{timestamp}_plot.png"
+            plot_file = output_dir / f"{data_source}_{timestamp}_plot.png"
             plt.savefig(plot_file)
             plt.close(fig)
             
@@ -474,9 +474,9 @@ class BacktestEngine:
         model_name = model._generate_multi_model_name(symbols, timeframes)
         
         # Try to load the model
-        model_dir = Path("models")
-        scaler_path = model_dir / f"{exchange}_{model_name}_scaler.pkl"
-        trace_path = model_dir / f"{exchange}_{model_name}_trace.netcdf"
+        model_dir = Path("models/multi_symbol/")
+        scaler_path = model_dir / f"{model_name}_scaler.pkl"
+        trace_path = model_dir / f"{model_name}_trace.netcdf"
         
         if not scaler_path.exists() or not trace_path.exists():
             self.logger.error(f"Multi-symbol model files not found. Please train the model first.")
@@ -537,15 +537,15 @@ class BacktestEngine:
                     
                     # Save individual backtest
                     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                    output_dir = Path(f"data/backtest_results/{exchange}/{symbol_safe}")
+                    output_dir = Path(f"data/backtest_results/{symbol_safe}/{timeframe}/{model_name}")
                     output_dir.mkdir(parents=True, exist_ok=True)
                     
                     # Add model name and data source to output for identification
-                    output_file = output_dir / f"{timeframe}_{model_name}_{data_source}_{timestamp}.csv"
+                    output_file = output_dir / f"{data_source}_{timestamp}.csv"
                     backtest_results.to_csv(output_file)
                     
                     # Save stats
-                    stats_file = output_dir / f"{timeframe}_{model_name}_{data_source}_{timestamp}_stats.csv"
+                    stats_file = output_dir / f"{data_source}_{timestamp}_stats.csv"
                     stats_df = pd.DataFrame([stats])
                     stats_df['data_source'] = data_source
                     stats_df.to_csv(stats_file, index=False)
@@ -553,8 +553,8 @@ class BacktestEngine:
                     self.logger.info(f"Saved backtest results for {symbol} {timeframe} to {output_file}")
                     
                     # Plot results
-                    self._plot_backtest_results(backtest_results, exchange, symbol, 
-                            f"{timeframe}_{model_name}", data_source)
+                    self._plot_backtest_results(backtest_results, symbol, 
+                                                timeframe, data_source)
                     
                 except Exception as e:
                     self.logger.error(f"Error during backtest of {symbol} {timeframe}: {str(e)}")
@@ -566,11 +566,11 @@ class BacktestEngine:
                 all_results[symbol] = symbol_results
         
         # Create a summary report
-        self._create_multi_summary(all_results, symbols, timeframes, exchange, model_name)
+        self._create_multi_summary(all_results, symbols, timeframes, model_name)
         
         return all_results
 
-    def _create_multi_summary(self, all_results, symbols, timeframes, exchange, model_name):
+    def _create_multi_summary(self, all_results, symbols, timeframes, model_name):
         """Create a summary report for multi-symbol backtest"""
         try:
             # Create a DataFrame for summary metrics
@@ -607,10 +607,10 @@ class BacktestEngine:
             
             # Save summary
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            output_dir = Path(f"data/backtest_results/{exchange}/summary")
+            output_dir = Path(f"data/backtest_results/{symbol}/{timeframe}/{model_name}/summary")
             output_dir.mkdir(parents=True, exist_ok=True)
             
-            summary_file = output_dir / f"multi_summary_{model_name}_{timestamp}.csv"
+            summary_file = output_dir / f"summary_{timestamp}.csv"
             summary_df.to_csv(summary_file, index=False)
             
             # Create summary visualizations
@@ -655,7 +655,7 @@ class BacktestEngine:
                                     color='white' if value < 0.5 else 'black')
             
             plt.tight_layout()
-            win_rate_file = output_dir / f"win_rate_heatmap_{model_name}_{timestamp}.png"
+            win_rate_file = output_dir / f"win_rate_heatmap_{timestamp}.png"
             plt.savefig(win_rate_file)
             plt.close()
             
@@ -681,7 +681,7 @@ class BacktestEngine:
                         color='green' if v > 0 else 'red')
             
             plt.tight_layout()
-            returns_file = output_dir / f"returns_by_symbol_{model_name}_{timestamp}.png"
+            returns_file = output_dir / f"returns_by_symbol_{timestamp}.png"
             plt.savefig(returns_file)
             plt.close()
             
@@ -747,7 +747,7 @@ class BacktestEngine:
             model_factory = ModelFactory(self.config)
             model = model_factory.create_model()
             
-            if not model.load_model(exchange, symbol, timeframe):
+            if not model.load_model(symbol, timeframe):
                 self.logger.error("Failed to load model for backtesting")
                 return False
             
@@ -763,10 +763,10 @@ class BacktestEngine:
             
             # 5. Save results with clear indication that these are test set results
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            self._save_backtest_results(backtest_results, stats, exchange, symbol, timeframe, "test_set")
+            self._save_backtest_results(backtest_results, stats, symbol, timeframe, "test_set")
             
             # 6. Plot results 
-            self._plot_backtest_results(backtest_results, exchange, symbol, timeframe, "test_set")
+            self._plot_backtest_results(backtest_results, symbol, timeframe, "test_set")
             
             # 7. Return results
             return backtest_results, stats
@@ -826,7 +826,7 @@ class BacktestEngine:
             model_factory = ModelFactory(self.config)
             model = model_factory.create_model()
             
-            if not model.load_model(exchange, symbol, timeframe):
+            if not model.load_model(symbol, timeframe, version='latest'):
                 self.logger.error("Failed to load model for backtesting")
                 return False
             
@@ -929,7 +929,7 @@ class BacktestEngine:
         
         # Create a summary report comparing performance across symbols and timeframes
         if all_results:
-            self._create_position_sizing_summary(all_results, symbols, timeframes, exchange)
+            self._create_position_sizing_summary(all_results, symbols, timeframes)
             self.logger.info(f"Multi-symbol position sizing tests complete for {len(all_results)} symbols")
         else:
             self.logger.warning("No valid results were generated in multi-symbol position sizing tests")
@@ -937,7 +937,7 @@ class BacktestEngine:
         return all_results
 
 
-    def _create_position_sizing_summary(self, all_results, symbols, timeframes, exchange):
+    def _create_position_sizing_summary(self, all_results, symbols, timeframes):
         """
         Create summary report for multi-symbol position sizing tests
         
@@ -945,7 +945,6 @@ class BacktestEngine:
             all_results (dict): Results dictionary
             symbols (list): List of symbols
             timeframes (list): List of timeframes
-            exchange (str): Exchange name
                 
         Returns:
             bool: True if successful, False otherwise
@@ -988,7 +987,8 @@ class BacktestEngine:
             
             # Save summary
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            output_dir = Path(f"data/backtest_results/{exchange}/summary")
+            model_type = self.config.get('model', 'model_type')
+            output_dir = Path(f"data/backtest_results/{symbol}/{timeframe}/{model_type}/summary")
             output_dir.mkdir(parents=True, exist_ok=True)
             
             summary_file = output_dir / f"pos_sizing_summary_{timestamp}.csv"

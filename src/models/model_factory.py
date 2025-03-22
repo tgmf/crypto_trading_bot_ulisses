@@ -207,9 +207,9 @@ class ModelFactory:
                 
                 trace = pm.sample(
                     draws=800,
-                    tune=500,
-                    chains=2,
-                    # cores=1,  # Use 1 core to avoid conflicts with JAX
+                    tune=1000,
+                    chains=4,
+                    cores=1,  # Use 1 core to avoid conflicts with JAX
                     target_accept=0.9,
                     return_inferencedata=True,
                     compute_convergence_checks=False,

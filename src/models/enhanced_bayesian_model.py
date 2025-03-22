@@ -27,6 +27,7 @@ import pickle
 import json
 import time
 import matplotlib
+from datetime import datetime
 matplotlib.use('Agg')
 plt = matplotlib.pyplot
 
@@ -103,8 +104,8 @@ class EnhancedBayesianModel(BayesianModel):
                 
                 trace = pm.sample(
                     draws=800,
-                    tune=500,
-                    chains=2,
+                    tune=1000,
+                    chains=4,
                     target_accept=0.9,
                     compute_convergence_checks=False
                 )
@@ -279,7 +280,7 @@ class EnhancedBayesianModel(BayesianModel):
                     p = pm.OrderedLogistic("p", eta=eta, cutpoints=alpha, observed=y_train_adj)
                     
                     # Sample from the posterior
-                    trace = pm.sample(1000, tune=1000, chains=2, cores=1, return_inferencedata=True)
+                    trace = pm.sample(1000, tune=1000, chains=4, cores=1, return_inferencedata=True)
                 
                 # Evaluate on training data
                 train_preds = self._predict_class(X_train_fold_scaled, trace)
@@ -318,10 +319,10 @@ class EnhancedBayesianModel(BayesianModel):
             self.build_model(X_all_scaled, y_all)
             
             # 6. Save model
-            self.save_model(exchange, symbol, timeframe)
+            self.save_model(symbol, timeframe)
             
             # Plot CV performance
-            self._plot_cv_results(cv_results, exchange, symbol, timeframe)
+            self._plot_cv_results(cv_results, symbol, timeframe)
             
             return train_val_df, test_df, cv_results
             
@@ -412,7 +413,7 @@ class EnhancedBayesianModel(BayesianModel):
                 self.build_model(X_train_scaled, y_train)
                 
                 # Save original model
-                self.save_model(exchange, symbol, timeframe)
+                self.save_model(symbol, timeframe)
                 self.logger.info("Original model trained and saved")
             
             # Now for the reversed training
@@ -440,14 +441,14 @@ class EnhancedBayesianModel(BayesianModel):
             self.build_model(X_train_reversed_scaled, y_train_reversed)
             
             # Save reversed model with indicator
-            self.save_model(exchange, symbol, f"{timeframe}_reversed")
+            self.save_model(symbol, timeframe, suffix="_reversed")
             
             # Evaluate original and reversed models
             self.logger.info("Evaluating both models for comparison")
             
             # Load the original model for comparison
             original_model = self.__class__(self.config)
-            original_model.load_model(exchange, symbol, timeframe)
+            original_model.load_model(symbol, timeframe)
             
             # Test original model on original test set
             X_orig_test = test_df[self.feature_cols].values
@@ -484,7 +485,7 @@ class EnhancedBayesianModel(BayesianModel):
             }
             
             # Save comparison metrics
-            metrics_dir = Path(f"models/comparisons/{exchange}/{symbol_safe}")
+            metrics_dir = Path(f"models/comparisons/{symbol_safe}/{timeframe}")
             metrics_dir.mkdir(parents=True, exist_ok=True)
             
             metrics_file = metrics_dir / f"{timeframe}_consistency_metrics.json"
@@ -492,7 +493,7 @@ class EnhancedBayesianModel(BayesianModel):
                 json.dump(comparison_metrics, f, indent=4)
             
             # Create visualization of model consistency
-            self._plot_model_consistency(comparison_metrics, exchange, symbol, timeframe)
+            self._plot_model_consistency(comparison_metrics, symbol, timeframe)
             
             # Log summary
             self.logger.info(f"Model consistency evaluation complete:")
@@ -517,7 +518,7 @@ class EnhancedBayesianModel(BayesianModel):
             self.logger.error(traceback.format_exc())
             return False
     
-    def save_model(self, exchange, symbol, timeframe, suffix=None):
+    def save_model(self, symbol, timeframe, comment=None, suffix=None):
         """
         Save the trained model with enhanced metadata
         
@@ -529,97 +530,74 @@ class EnhancedBayesianModel(BayesianModel):
         - JAX acceleration status
         
         Args:
-            exchange (str): Exchange name
             symbol (str): Trading pair symbol
             timeframe (str): Data timeframe
+            comment (str): Optional comment for the model
+            suffix (str): Optional suffix for the model files
             
         Returns:
             bool: True if successful, False otherwise
         """
         try:
             # First call the parent class method
-            result = super().save_model(exchange, symbol, timeframe)
+            result, filename_base = super().save_model(symbol, timeframe, comment, suffix)
             if not result:
                 return False
                 
             # Add enhanced model specific data
-            model_dir = Path("models")
             symbol_safe = symbol.replace('/', '_')
-
-            # Add suffix if provided
-            filename_base = f"{exchange}_{symbol_safe}_{timeframe}"
-            if suffix:
-                filename_base += f"{suffix}"
-            
-            # Save performance metrics
-            metrics_path = model_dir / f"{filename_base}_metrics.json"  
+            model_type = self.__class__.__name__.lower()
+        
+            # Get latest metrics file to update
+            model_dir = Path(f"models/{symbol_safe}/{timeframe}/{model_type}")
+        
+            # Use the filename_base for consistent naming
+            metrics_path = model_dir / f"{filename_base}_metrics.json" 
 
             # Combine performance metrics with acceleration info
-            combined_metrics = self.performance_metrics.copy()
-            combined_metrics['using_jax_acceleration'] = getattr(self, 'using_jax_acceleration', False)
+            combined_metrics = self.performance_metrics.copy() if hasattr(self, 'performance_metrics') else {}
             combined_metrics['model_type'] = 'enhanced_bayesian'
+            combined_metrics['comment'] = comment
             
             with open(metrics_path, 'w') as f:
                 json.dump(combined_metrics, f, indent=2)
+        
+            # Create 'latest' symlink for convenience
+            latest_metrics = model_dir / "latest_metrics.json"
+            if latest_metrics.exists():
+                latest_metrics.unlink()
+            latest_metrics.symlink_to(metrics_path.name)
             
             self.logger.info(f"Enhanced model metrics saved to {metrics_path}")
-            return True
+            self.logger.info(f"Also created symlink at {latest_metrics}")
+            return True, filename_base
             
         except Exception as e:
             self.logger.error(f"Error saving enhanced model: {str(e)}")
-            return False
+            return False, None
     
-    def load_model(self, exchange, symbol, timeframe, suffix=None):
+    def load_model(self, symbol, timeframe, timestamp=None, 
+                    comment=None, suffix=None, version='latest'):
         """
-        Load a trained model with enhanced metadata
-        
-        Loads all components needed for prediction, plus additional metrics:
-        - Scaler for feature normalization
-        - Trace (posterior samples) from PyMC
-        - Feature column list (if available)
-        - Performance metrics (if available)
+        Load a trained model using parent implementation
         
         Args:
-            exchange (str): Exchange name
             symbol (str): Trading pair symbol
             timeframe (str): Data timeframe
+            timestamp (str, optional): Timestamp to filter by
+            comment (str, optional): Comment to filter by
+            suffix (str, optional): Optional suffix for the model files
+            version (str): 'latest' or 'specific'
             
         Returns:
             bool: True if successful, False otherwise
         """
-        try:
-            # First call the parent class method
-            result = super().load_model(exchange, symbol, timeframe)
-            if not result:
-                return False
-                
-            # Load enhanced model specific data
-            model_dir = Path("models")
-            symbol_safe = symbol.replace('/', '_')
+        # Initialize empty performance_metrics
+        self.performance_metrics = {}
         
-            # Add suffix if provided
-            filename_base = f"{exchange}_{symbol_safe}_{timeframe}"
-            if suffix:
-                filename_base += f"{suffix}"
-            
-            # Load performance metrics if available
-            metrics_path = model_dir / f"{filename_base}_metrics.json"
-            if metrics_path.exists():
-                with open(metrics_path, 'r') as f:
-                    self.performance_metrics = json.load(f)
-                    
-                # Check if this model was trained with JAX acceleration
-                self.using_jax_acceleration = self.performance_metrics.get('using_jax_acceleration', False)
-                
-                self.logger.info(f"Loaded enhanced model metrics from {metrics_path}")
-                if self.using_jax_acceleration:
-                    self.logger.info("This model was trained with JAX acceleration")
-            
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Error loading enhanced model: {str(e)}")
-            return False
+        # Just use the parent class implementation
+        return super().load_model(symbol, timeframe, timestamp, 
+                                comment, suffix, version)
     
     def predict_probabilities(self, df_or_X):
         """
@@ -708,7 +686,7 @@ class EnhancedBayesianModel(BayesianModel):
         # Return most likely class
         return np.argmax(probs, axis=1)
     
-    def _plot_cv_results(self, cv_results, exchange, symbol, timeframe):
+    def _plot_cv_results(self, cv_results, symbol, timeframe):
         """
         Plot cross-validation results
         
@@ -718,7 +696,6 @@ class EnhancedBayesianModel(BayesianModel):
         
         Args:
             cv_results (dict): Dictionary with cross-validation results
-            exchange (str): Exchange name
             symbol (str): Trading pair symbol
             timeframe (str): Data timeframe
             
@@ -728,7 +705,8 @@ class EnhancedBayesianModel(BayesianModel):
         try:
             # Create directory for plots if it doesn't exist
             symbol_safe = symbol.replace('/', '_')
-            output_dir = Path(f"models/{exchange}/{symbol_safe}")
+            model_type = self.__class__.__name__.lower()
+            output_dir = Path(f"models/{symbol_safe}/{timeframe}/{model_type}")
             output_dir.mkdir(parents=True, exist_ok=True)
             
             # Create figure
@@ -760,7 +738,8 @@ class EnhancedBayesianModel(BayesianModel):
             plt.grid(True, alpha=0.3)
             
             # Save figure
-            plot_file = output_dir / f"cv_results_{timeframe}.png"
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            plot_file = output_dir / f"cv_results_{timestamp}.png"
             plt.savefig(plot_file)
             plt.close()
             
@@ -771,7 +750,7 @@ class EnhancedBayesianModel(BayesianModel):
             self.logger.error(f"Error plotting CV results: {str(e)}")
             return False
 
-    def _plot_model_consistency(self, metrics, exchange, symbol, timeframe):
+    def _plot_model_consistency(self, metrics, symbol, timeframe):
         """
         Create visualizations of model consistency metrics
         
@@ -781,7 +760,6 @@ class EnhancedBayesianModel(BayesianModel):
         
         Args:
             metrics (dict): Dictionary with comparison metrics
-            exchange (str): Exchange name
             symbol (str): Trading pair symbol
             timeframe (str): Data timeframe
             
@@ -791,7 +769,8 @@ class EnhancedBayesianModel(BayesianModel):
         try:
             # Create output directory
             symbol_safe = symbol.replace('/', '_')
-            output_dir = Path(f"models/comparisons/{exchange}/{symbol_safe}")
+            model_type = self.__class__.__name__.lower()
+            output_dir = Path(f"models/comparisons/{symbol_safe}/{timeframe}/{model_type}")
             output_dir.mkdir(parents=True, exist_ok=True)
             
             # Create figure with 2 subplots
@@ -854,7 +833,8 @@ class EnhancedBayesianModel(BayesianModel):
             plt.subplots_adjust(top=0.9)
             
             # Save figure
-            plot_file = output_dir / f"{timeframe}_consistency_plot.png"
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            plot_file = output_dir / f"consistency_plot_{timestamp}.png"
             plt.savefig(plot_file)
             plt.close(fig)
             
@@ -1094,10 +1074,10 @@ class EnhancedBayesianModel(BayesianModel):
             model_name = self._generate_multi_model_name(symbols, timeframes)
             
             # Save model
-            self.save_model_multi(exchange, model_name)
+            self.save_model_multi(model_name)
             
             # Create visualization of the training process
-            self._plot_training_distribution(y_combined, symbols, timeframes, exchange)
+            self._plot_training_distribution(y_combined, symbols, timeframes)
             
             self.logger.info(f"Multi-symbol enhanced model trained and saved successfully")
             return True
@@ -1107,7 +1087,7 @@ class EnhancedBayesianModel(BayesianModel):
             self.logger.error(traceback.format_exc())
             return False
 
-    def _plot_training_distribution(self, y_combined, symbols, timeframes, exchange):
+    def _plot_training_distribution(self, y_combined, symbols, timeframes):
         """Create visualization of training data distribution"""
         try:
             import matplotlib.pyplot as plt
@@ -1136,7 +1116,7 @@ class EnhancedBayesianModel(BayesianModel):
             
             # Save figure
             model_name = self._generate_multi_model_name(symbols, timeframes)
-            output_dir = Path(f"models/{exchange}")
+            output_dir = Path(f"models/{symbols[0]}/{timeframes[0]}/enhanced_bayesian")
             output_dir.mkdir(exist_ok=True, parents=True)
             
             plt.savefig(output_dir / f"{model_name}_class_distribution.png")
@@ -1171,7 +1151,7 @@ class EnhancedBayesianModel(BayesianModel):
             
         return f"multi_{symbols_str}_{timeframes_str}"
 
-    def save_model_multi(self, exchange, model_name):
+    def save_model_multi(self, model_name):
         """
         Save the multi-symbol model
         
@@ -1179,28 +1159,27 @@ class EnhancedBayesianModel(BayesianModel):
         a special naming convention for identification.
         
         Args:
-            exchange (str): Exchange name
             model_name (str): Generated model name
             
         Returns:
             bool: True if successful, False otherwise
         """
         try:
-            # Create directory
-            model_dir = Path("models")
+            # Create directory for multi-symbol models
+            model_dir = Path("models/multi_symbol/")
             model_dir.mkdir(exist_ok=True)
             
             # Save scaler
-            scaler_path = model_dir / f"{exchange}_{model_name}_scaler.pkl"
+            scaler_path = model_dir / f"{model_name}_scaler.pkl"
             with open(scaler_path, 'wb') as f:
                 pickle.dump(self.scaler, f)
             
             # Save trace (posterior samples)
-            trace_path = model_dir / f"{exchange}_{model_name}_trace.netcdf"
+            trace_path = model_dir / f"{model_name}_trace.netcdf"
             az.to_netcdf(self.trace, trace_path)
             
             # Save feature columns list
-            feat_cols_path = model_dir / f"{exchange}_{model_name}_feature_cols.pkl"
+            feat_cols_path = model_dir / f"{model_name}_feature_cols.pkl"
             with open(feat_cols_path, 'wb') as f:
                 pickle.dump(self.feature_cols, f)
             
@@ -1214,28 +1193,8 @@ class EnhancedBayesianModel(BayesianModel):
     def _calculate_accuracy(self, predictions, targets):
         """Calculate accuracy of predictions"""
         return np.mean(predictions == targets)
-    
-    def _save_cv_results(self, cv_results, exchange, symbol, timeframe):
-        """Save cross-validation results"""
-        try:
-            # Create directory
-            model_dir = Path("models")
-            model_dir.mkdir(exist_ok=True)
-            
-            # Save CV results
-            symbol_safe = symbol.replace('/', '_')
-            cv_results_path = model_dir / f"{exchange}_{symbol_safe}_{timeframe}_cv_results.pkl"
-            with open(cv_results_path, 'wb') as f:
-                pickle.dump(cv_results, f)
-            
-            self.logger.info(f"CV results saved to {cv_results_path}")
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Error saving CV results: {str(e)}")
-            return False
         
-    def continue_training(self, new_data_df, exchange='binance', symbol='BTC/USDT', timeframe='1h'):
+    def continue_training(self, new_data_df, symbol='BTC/USDT', timeframe='1h'):
         """
         Continue training the model with new data
         
@@ -1244,7 +1203,6 @@ class EnhancedBayesianModel(BayesianModel):
         
         Args:
             new_data_df (DataFrame): New data to train on
-            exchange (str): Exchange name
             symbol (str): Trading pair symbol
             timeframe (str): Data timeframe
             
@@ -1302,8 +1260,8 @@ class EnhancedBayesianModel(BayesianModel):
                     self.logger.info("Sampling posterior for continued training")
                     new_trace = pm.sample(
                         draws=800, 
-                        tune=500, 
-                        chains=2, 
+                        tune=1000, 
+                        chains=4, 
                         cores=1, 
                         return_inferencedata=True,
                         target_accept=0.9
@@ -1314,7 +1272,7 @@ class EnhancedBayesianModel(BayesianModel):
                 self.trace = new_trace
                 
                 # Save updated model
-                self.save_model(exchange, symbol, timeframe)
+                self.save_model(symbol, timeframe)
                 
                 return True
                 
@@ -1349,7 +1307,7 @@ class EnhancedBayesianModel(BayesianModel):
                 self.trace = fallback_trace
                 
                 # Save updated model
-                self.save_model(exchange, symbol, timeframe)
+                self.save_model(symbol, timeframe)
                 
                 return True
             
@@ -1512,7 +1470,7 @@ class EnhancedBayesianModel(BayesianModel):
         
     def run_backtest_with_position_sizing(self, df, exchange='binance', symbol='BTC/USDT', 
                                             timeframe='15m', no_trade_threshold=0.96, 
-                                            min_position_change=0.025, compound_returns=True):
+                                            min_position_change=0.025, compound_returns=True, exaggerate=True):
         """
         Run backtest with continuous position sizing based on probability distributions
     
@@ -1521,6 +1479,7 @@ class EnhancedBayesianModel(BayesianModel):
         2. Position sizes directly correspond to probability values 
         3. Only updates positions when probability changes exceed threshold
         4. Optionally compounds returns to grow/shrink position sizes
+        5. Optionally exaggerates position sizes to increase contrast between signals
         
         Args:
             df (DataFrame): Price data with OHLCV columns
@@ -1530,7 +1489,8 @@ class EnhancedBayesianModel(BayesianModel):
             no_trade_threshold (float): Threshold for no_trade probability to ignore signals
             min_position_change (float): Minimum position change to avoid fee churn
             compound_returns (bool): Whether to compound returns for position sizing
-            
+            exaggerate (bool): Whether to exaggerate position sizes based on probability differences
+
         Returns:
             tuple: (results_df, metrics, fig) with backtest results, performance metrics, and visualization
         """
@@ -1551,8 +1511,55 @@ class EnhancedBayesianModel(BayesianModel):
             results['short_prob'] = probabilities[:, 0]
             results['no_trade_prob'] = probabilities[:, 1]
             results['long_prob'] = probabilities[:, 2]
+        
+            # Store original probabilities for reference
+            results['original_long_prob'] = results['long_prob'].copy()
+            results['original_short_prob'] = results['short_prob'].copy()
             
-            # 4. Calculate raw position sizes directly from probabilities
+            # 4. Apply exaggeration if enabled
+            if exaggerate:
+            
+                # Calculate the redistributable probability (what's below no_trade_threshold)
+                results['redistributable_prob'] = np.maximum(0, no_trade_threshold - results['no_trade_prob'])
+                
+                # Apply exaggeration to each row
+                for i in range(len(results)):
+                    if results.iloc[i]['no_trade_prob'] < no_trade_threshold:
+                        # We have redistributable probability
+                        redist_prob = results.iloc[i]['redistributable_prob']
+                        long_prob = results.iloc[i]['long_prob']
+                        short_prob = results.iloc[i]['short_prob']
+                        
+                        # Calculate the proportion of long vs short
+                        total_directional = long_prob + short_prob
+                        if total_directional > 0:
+                            # Create a power function to exaggerate the difference
+                            # Higher power = more exaggeration
+                            exaggeration_power = 2.0  # Adjust this parameter for more/less exaggeration
+                            
+                            # Calculate normalized proportions
+                            long_ratio = long_prob / total_directional
+                            short_ratio = short_prob / total_directional
+                            
+                            # Apply power function to exaggerate differences
+                            long_exaggerated = long_ratio ** exaggeration_power
+                            short_exaggerated = short_ratio ** exaggeration_power
+                            
+                            # Renormalize to ensure they sum to 1
+                            total_exaggerated = long_exaggerated + short_exaggerated
+                            if total_exaggerated > 0:  # Avoid division by zero
+                                long_exaggerated = long_exaggerated / total_exaggerated
+                                short_exaggerated = short_exaggerated / total_exaggerated
+                                
+                                # Distribute redistributable probability according to exaggerated ratios
+                                long_boost = redist_prob * long_exaggerated
+                                short_boost = redist_prob * short_exaggerated
+                                
+                                # Update probabilities
+                                results.iloc[i, results.columns.get_loc('long_prob')] = long_prob + long_boost
+                                results.iloc[i, results.columns.get_loc('short_prob')] = short_prob + short_boost
+            
+            # 5. Calculate raw position sizes directly from probabilities
             # Ignore probabilities if no_trade is high
             results['raw_long_position'] = np.where(
                 results['no_trade_prob'] >= no_trade_threshold,
@@ -1566,21 +1573,21 @@ class EnhancedBayesianModel(BayesianModel):
                 results['short_prob']  # Otherwise use short probability directly
             )
         
-            # 5. Initialize compounding factor (starting with 1.0 = 100% of base size)
+            # 6. Initialize compounding factor (starting with 1.0 = 100% of base size)
             if compound_returns:
                 results['compound_factor'] = 1.0
             
-            # 6. Apply minimum change threshold to avoid fee churn
+            # 7. Apply minimum change threshold to avoid fee churn
             # Handle each position type separately
             results['long_position'] = 0.0
             results['short_position'] = 0.0
             prev_long = 0.0
             prev_short = 0.0
             
-            # 7. Calculate price return
+            # 8. Calculate price return
             results['price_return'] = results['close'].pct_change()
             
-            # 8. Loop through data and calculate positions with optional compounding
+            # 9. Loop through data and calculate positions with optional compounding
             for i in range(len(results)):
                 # Apply compounding from previous period if enabled
                 compound_factor = 1.0
@@ -1602,8 +1609,16 @@ class EnhancedBayesianModel(BayesianModel):
                             
                             # Apply fees
                             fee_rate = 0.0006  # 0.06%
-                            long_change = abs(results.iloc[i-1]['long_position'] - results.iloc[i-2]['long_position'])
-                            short_change = abs(results.iloc[i-1]['short_position'] - results.iloc[i-2]['short_position'])
+                
+                            # Safely calculate position changes
+                            if i > 2:
+                                long_change = abs(results.iloc[i-1]['long_position'] - results.iloc[i-2]['long_position'])
+                                short_change = abs(results.iloc[i-1]['short_position'] - results.iloc[i-2]['short_position'])
+                            else:
+                                # For the first rows, use position directly as the change
+                                long_change = results.iloc[i-1]['long_position']
+                                short_change = results.iloc[i-1]['short_position']
+                            
                             fee_impact = (long_change + short_change) * fee_rate
                             
                             # Update compound factor
@@ -1646,32 +1661,32 @@ class EnhancedBayesianModel(BayesianModel):
                 results.iloc[i, results.columns.get_loc('short_position')] = new_short
                 prev_short = new_short
             
-            # 9. Calculate net position (for compatibility)
+            # 10. Calculate net position (for compatibility)
             results['position'] = results['long_position'] - results['short_position']
             
-            # 10. Calculate separate returns for long and short positions
+            # 11. Calculate separate returns for long and short positions
             results['long_return'] = results['long_position'].shift(1) * results['price_return']
             results['short_return'] = -1 * results['short_position'].shift(1) * results['price_return']  # Negative for shorts
             results['strategy_return'] = results['long_return'] + results['short_return']
             
-            # 11. Add fee impact - fees are proportional to position change
+            # 12. Add fee impact - fees are proportional to position change
             fee_rate = 0.0006  # Typical fee of 0.06%
             results['long_change'] = results['long_position'].diff().abs()
             results['short_change'] = results['short_position'].diff().abs()
             results['fee_impact'] = (results['long_change'] + results['short_change']) * fee_rate
             
-            # 12. Net returns after fees
+            # 13. Net returns after fees
             results['net_return'] = results['strategy_return'] - results['fee_impact']
             
-            # 13. Calculate cumulative returns
+            # 14. Calculate cumulative returns
             results['price_cumulative'] = (1 + results['price_return']).cumprod() - 1
             results['strategy_cumulative'] = (1 + results['net_return']).cumprod() - 1
             
-            # 14. Calculate separate cumulative returns for long and short
+            # 15. Calculate separate cumulative returns for long and short
             results['long_cumulative'] = (1 + results['long_return']).cumprod() - 1
             results['short_cumulative'] = (1 + results['short_return']).cumprod() - 1
             
-            # 15. Calculate performance metrics
+            # 16. Calculate performance metrics
             metrics = self._calculate_position_sizing_metrics(results, min_position_change)
             
             # Add compounding information to metrics
@@ -1687,20 +1702,31 @@ class EnhancedBayesianModel(BayesianModel):
             else:
                 metrics['compound_returns'] = False
             
-            # 16. Create visualization using result logger
+            # Add exaggeration information to metrics
+            metrics['exaggerate_positions'] = exaggerate
+            if exaggerate:
+                metrics['avg_long_boost'] = (results['long_prob'] - results['original_long_prob']).mean()
+                metrics['avg_short_boost'] = (results['short_prob'] - results['original_short_prob']).mean()
+                metrics['max_long_boost'] = (results['long_prob'] - results['original_long_prob']).max()
+                metrics['max_short_boost'] = (results['short_prob'] - results['original_short_prob']).max()
+            
+            # 17. Create visualization using result logger
             from ..utils.result_logger import ResultLogger
             result_logger = ResultLogger(getattr(self, 'config', {}))
+
+            # Strategy type suffix based on exaggeration
+            strategy_type = 'position_sizing_exaggerated' if exaggerate else 'position_sizing'
 
             # Save results to standardized formats
             files = result_logger.save_results(
                 results, metrics, exchange, symbol, timeframe, 
-                strategy_type='position_sizing', data_source='test_set'
+                strategy_type=strategy_type, data_source='test_set'
             )
 
             # Create visualizations
             viz_files = result_logger.plot_results(
                 results, metrics, exchange, symbol, timeframe, 
-                strategy_type='position_sizing', data_source='test_set'
+                strategy_type=strategy_type, data_source='test_set'
             )
             
             # Add visualization paths to metrics

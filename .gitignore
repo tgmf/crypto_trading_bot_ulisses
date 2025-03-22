@@ -7,11 +7,7 @@ data/*
 config/*_keys.yaml
 
 # Model artifacts
-models/*.pkl
-models/*.h5
-models/*.joblib
-models/*.netcdf
-models/*.json
+models/*
 
 # Jupyter
 .ipynb_checkpoints/

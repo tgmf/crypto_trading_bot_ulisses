@@ -184,11 +184,11 @@ def main():
         timeframe = timeframes[0]
         
         # Try to load existing model
-        if not model.load_model(exchange, symbol, timeframe):
-            logger.error(f"No existing model found for {exchange} {symbol} {timeframe}")
+        if not model.load_model(symbol, timeframe):
+            logger.error(f"No existing model found for {symbol} {timeframe}")
             sys.exit(1)
         
-        logger.info(f"Successfully loaded existing model for {exchange} {symbol} {timeframe}")
+        logger.info(f"Successfully loaded existing model for {symbol} {timeframe}")
         
         # Load new data
         symbol_safe = symbol.replace('/', '_')
@@ -219,8 +219,8 @@ def main():
             df = df.sample(max_samples, random_state=42)
         
         # Continue training the model
-        logger.info(f"Continuing training for {exchange} {symbol} {timeframe} with {len(df)} samples")
-        model.continue_training(df, exchange, symbol, timeframe)
+        logger.info(f"Continuing training for {symbol} {timeframe} with {len(df)} samples")
+        model.continue_training(df, symbol, timeframe)
         
         logger.info("Model training continued successfully")
     elif args.mode == 'incremental':
@@ -232,8 +232,8 @@ def main():
         # Get additional parameters
         chunk_size = args.chunk_size if hasattr(args, 'chunk_size') else 50000
         test_size = args.test_size if hasattr(args, 'test_size') else 0.001
-        overlap = args.overlap if hasattr(args, 'overlap') else 5000
-        max_memory = args.max_memory if hasattr(args, 'max_memory') else 4000
+        overlap = args.overlap if hasattr(args, 'overlap') else 2500
+        max_memory = args.max_memory if hasattr(args, 'max_memory') else 8000
         checkpoint_freq = args.checkpoint_freq if hasattr(args, 'checkpoint_freq') else 1
         resume_from = args.resume_from if hasattr(args, 'resume_from') else None
         
