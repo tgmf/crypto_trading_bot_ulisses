@@ -1,9 +1,5 @@
 # Data files
-data/raw/
-data/processed/
-data/backtest_results/
-data/test_sets/
-data/walk_forward_results/
+data/*
 
 # API keys and secrets
 *.env
@@ -15,6 +11,7 @@ models/*.pkl
 models/*.h5
 models/*.joblib
 models/*.netcdf
+models/*.json
 
 # Jupyter
 .ipynb_checkpoints/

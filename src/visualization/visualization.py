@@ -8,6 +8,8 @@ Visualization tools for trading strategy analysis.
 import logging
 import pandas as pd
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend that doesn't require Qt
 import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
@@ -21,12 +23,12 @@ class VisualizationTool:
         self.config = config
         self.logger = logging.getLogger(__name__)
     
-    def plot_backtest_results(self, results, output_path=None):
-        """Plot backtest results"""
+    def plot_backtest_results(self, results, output_path=None, continuous_position=False):
+        """Plot backtest results with support for continuous position sizing"""
         try:
             # Create figure
             fig, axes = plt.subplots(3, 1, figsize=(14, 16), 
-                                     gridspec_kw={'height_ratios': [2, 1, 1]})
+                                        gridspec_kw={'height_ratios': [2, 1, 1]})
             
             # Get symbol and timeframe info
             symbol = results.get('symbol', 'Unknown')
@@ -40,32 +42,54 @@ class VisualizationTool:
             
             # Upper plot: Price with positions
             axes[0].plot(df.index, df['close'], label=f'{symbol}', alpha=0.7)
+        
+            # Check if this is a traditional backtest (with exits) or position sizing
+            is_position_sizing = ('position' in df.columns and 
+                                    'exit_price' not in df.columns and
+                                    df['position'].dtype == 'float64')
+        
+            if is_position_sizing:
+                # For position sizing, shade the background based on position
+                for i in range(1, len(df)):
+                    pos = df['position'].iloc[i]
+                    if pos > 0:
+                        axes[0].axvspan(df.index[i-1], df.index[i], 
+                                    alpha=min(0.3, abs(pos)*0.3), color='green', lw=0)
+                    elif pos < 0:
+                        axes[0].axvspan(df.index[i-1], df.index[i], 
+                                    alpha=min(0.3, abs(pos)*0.3), color='red', lw=0)
             
+            else:
+            # Traditional backtesting with discrete positions
             # Mark positions
-            long_entries = df[df['position'].diff() == 1]
-            short_entries = df[df['position'].diff() == -1]
-            hedged_entries = df[df['position'].diff() == 2]
-            exits = df[~df['exit_price'].isna()]
+                if 'position' in df.columns:
+                    long_entries = df[df['position'].diff() == 1]
+                    short_entries = df[df['position'].diff() == -1]
+                    hedged_entries = df[df['position'].diff() == 2]
+                    
+                    # Only try to use exit_price if it exists
+                    if 'exit_price' in df.columns:
+                        exits = df[~df['exit_price'].isna()]
+                        axes[0].scatter(exits.index, exits['close'], marker='x', color='black', 
+                                    s=80, label='Exit')
+                    
+                    # Plot position markers
+                    axes[0].scatter(long_entries.index, long_entries['close'], marker='^', color='green', 
+                                s=100, label='Long Entry')
+                    axes[0].scatter(short_entries.index, short_entries['close'], marker='v', color='red', 
+                                s=100, label='Short Entry')
+                    axes[0].scatter(hedged_entries.index, hedged_entries['close'], marker='s', color='purple', 
+                                s=100, label='Hedged Position')
             
-            # Plot position markers
-            axes[0].scatter(long_entries.index, long_entries['close'], marker='^', color='green', 
-                          s=100, label='Long Entry')
-            axes[0].scatter(short_entries.index, short_entries['close'], marker='v', color='red', 
-                          s=100, label='Short Entry')
-            axes[0].scatter(hedged_entries.index, hedged_entries['close'], marker='s', color='purple', 
-                          s=100, label='Hedged Position')
-            axes[0].scatter(exits.index, exits['close'], marker='x', color='black', 
-                          s=80, label='Exit')
-            
-            # Add probability shading for clarity (every 20th point to avoid clutter)
+            # Add probability shading if available
             if 'long_prob' in df.columns and 'short_prob' in df.columns:
-                for i in range(0, len(df), 20):
+                for i in range(0, len(df), 20):  # Every 20th point to avoid clutter
                     if df['long_prob'].iloc[i] > 0.3:
                         axes[0].axvspan(df.index[i], df.index[min(i+1, len(df)-1)], 
-                                      alpha=df['long_prob'].iloc[i] * 0.3, color='green', lw=0)
+                                    alpha=df['long_prob'].iloc[i] * 0.3, color='green', lw=0)
                     if df['short_prob'].iloc[i] > 0.3:
                         axes[0].axvspan(df.index[i], df.index[min(i+1, len(df)-1)], 
-                                      alpha=df['short_prob'].iloc[i] * 0.3, color='red', lw=0)
+                                    alpha=df['short_prob'].iloc[i] * 0.3, color='red', lw=0)
             
             axes[0].set_title(f'{symbol} {timeframe} Price with Trading Signals')
             axes[0].set_ylabel('Price')
@@ -76,7 +100,7 @@ class VisualizationTool:
             if 'cumulative_returns' in df.columns and 'strategy_cumulative' in df.columns:
                 axes[1].plot(df.index, df['cumulative_returns'], label='Buy & Hold', color='blue')
                 axes[1].plot(df.index, df['strategy_cumulative'], 
-                           label='Strategy', color='purple')
+                            label='Strategy', color='purple')
                 axes[1].set_title('Strategy Performance')
                 axes[1].set_ylabel('Cumulative Returns')
                 axes[1].legend()
@@ -84,12 +108,26 @@ class VisualizationTool:
             
             # Bottom plot: Position over time
             if 'position' in df.columns:
-                axes[2].plot(df.index, df['position'], label='Position', color='black')
-                axes[2].set_title('Position Over Time')
+                # Fix the conditional statement - it was comparing with a string
+                if is_position_sizing:
+                    # For continuous positions (-1.0 to 1.0)
+                    axes[2].plot(df.index, df['position'], label='Position', color='black')
+                    axes[2].fill_between(df.index, 0, df['position'], 
+                                    where=df['position'] > 0, color='green', alpha=0.3)
+                    axes[2].fill_between(df.index, 0, df['position'], 
+                                    where=df['position'] < 0, color='red', alpha=0.3)
+                    axes[2].set_title('Position Size Over Time')
+                    axes[2].set_yticks([-1, -0.5, 0, 0.5, 1])
+                    axes[2].axhline(y=0, color='gray', linestyle='--')
+                else:
+                    # For discrete positions (-1, 0, 1, 2)
+                    axes[2].plot(df.index, df['position'], label='Position', color='black')
+                    axes[2].set_title('Position Over Time')
+                    axes[2].set_yticks([-1, 0, 1, 2])
+                    axes[2].set_yticklabels(['Short', 'Flat', 'Long', 'Hedged'])
+                
                 axes[2].set_xlabel('Date')
                 axes[2].set_ylabel('Position')
-                axes[2].set_yticks([-1, 0, 1, 2])
-                axes[2].set_yticklabels(['Short', 'Flat', 'Long', 'Hedged'])
                 axes[2].grid(True, alpha=0.3)
             
             plt.tight_layout()
@@ -105,6 +143,8 @@ class VisualizationTool:
                 
         except Exception as e:
             self.logger.error(f"Error plotting backtest results: {str(e)}")
+            import traceback
+            self.logger.error(traceback.format_exc())
             return False
     
     def plot_performance_metrics(self, results, output_path=None):

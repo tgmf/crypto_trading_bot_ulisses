@@ -49,6 +49,11 @@ show_help() {
   echo ""
 }
 
+# Set matplotlib to use Agg backend
+export MPLBACKEND=Agg
+# Prevent Qt from looking for Wayland
+export QT_QPA_PLATFORM=offscreen
+
 # Make sure we're in the project root directory
 cd "$(dirname "$0")"
 
@@ -80,6 +85,14 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Set memory limit based on command
+case "$COMMAND" in
+  train|incremental)
+    # Set a more reasonable memory limit (16GB)
+    ulimit -m 16000000
+    ;;
+esac
+
 case "$COMMAND" in
   analyze)
     echo "Analyzing backtest results..."
@@ -109,7 +122,7 @@ case "$COMMAND" in
     echo "Training incrementally on large dataset with GPU acceleration..."
     
     # Run with GPU configuration utility
-    python -m src.training.incremental_training $OPTIONS
+    python -m src.main --mode incremental $OPTIONS
     ;;
   notebook)
     echo "Launching Jupyter notebook..."
@@ -117,8 +130,6 @@ case "$COMMAND" in
     ;;
   train)
     echo "Training model..."
-    export PYTENSOR_FLAGS="device=cuda,floatX=float32"
-    ulimit -m 18000000  # Limit memory usage to 8GB
     python -m src.main --mode train $OPTIONS
     ;;
   help|*)

@@ -15,9 +15,12 @@ JAX_AVAILABLE = jax_spec is not None
 
 tf_spec = importlib.util.find_spec("tensorflow")
 TF_AVAILABLE = tf_spec is not None
+TF_BAYESIAN_AVAILABLE = False
 
 pymc_spec = importlib.util.find_spec("pymc")
 PYMC_AVAILABLE = pymc_spec is not None
+BAYESIAN_AVAILABLE = False
+ENHANCED_AVAILABLE = False
 
 # Try to import based on availability
 if PYMC_AVAILABLE:
@@ -177,9 +180,11 @@ class ModelFactory:
         
         def jax_accelerated_build_model(X_train, y_train):
             import pymc as pm
+            import pytensor
             
-            # Set PyMC to use 32-bit precision for better JAX compatibility
-            pm.config.change_flags({"compute_test_value": "off"})
+            # Set pytensor to use 32-bit precision for better JAX compatibility
+            pytensor.config.compute_test_value = "off"
+            pytensor.config.floatX = "float32"
             
             # Adjust y_train to be 0, 1, 2 instead of -1, 0, 1 for ordered logistic
             y_train_adj = y_train + 1
@@ -204,10 +209,11 @@ class ModelFactory:
                     draws=800,
                     tune=500,
                     chains=2,
-                    cores=1,  # Use 1 core to avoid conflicts with JAX
+                    # cores=1,  # Use 1 core to avoid conflicts with JAX
                     target_accept=0.9,
                     return_inferencedata=True,
-                    compute_convergence_checks=False
+                    compute_convergence_checks=False,
+                    discard_tuned_samples=True 
                 )
                 
                 sampling_time = time.time() - start_time

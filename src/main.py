@@ -9,6 +9,8 @@ import logging  # For logging messages
 import sys  # For system-specific parameters and functions
 import yaml  # For parsing YAML configuration files
 from pathlib import Path  # For handling file system paths
+from src.training.incremental_training import train_incrementally
+
 
 def setup_logging():
     """Configure logging settings"""
@@ -55,7 +57,7 @@ def main():
     parser.add_argument('--config', type=str, default='config/config.yaml',
                         help='Path to configuration file')  # Argument for specifying the config file path
     parser.add_argument('--mode', type=str, 
-                        choices=['collect', 'train', 'backtest', 'paper', 'live'],
+                        choices=['backtest', 'collect', 'incremental', 'live', 'paper', 'train', 'continue-train'],
                         default='collect', help='Operation mode')  # Argument for specifying the operation mode
     parser.add_argument('--model', type=str,
                     choices=['bayesian', 'tf_bayesian', 'enhanced_bayesian', 'quantum'],
@@ -80,8 +82,18 @@ def main():
                     help='Use time-series cross-validation for training')  # Argument for enabling time-series cross-validation
     parser.add_argument('--reverse', action='store_true',
                         help='Train on test set and evaluate on training set (for model consistency testing)')  # Argument for enabling reverse testing
-    parser.add_argument('--test-size', type=float, default=0.3,
+    parser.add_argument('--test-size', type=float, default=0.2,
                         help='Proportion of data to use for testing (0.0-1.0)')  # Argument for specifying test size
+    parser.add_argument('--chunk-size', type=int, default=50000,
+                        help='Number of samples per chunk for incremental training')
+    parser.add_argument('--overlap', type=int, default=5000,
+                        help='Overlap between chunks for incremental training')
+    parser.add_argument('--max-memory', type=int, default=4000,
+                        help='Maximum memory usage in MB for incremental training')
+    parser.add_argument('--checkpoint-freq', type=int, default=1,
+                        help='Save checkpoint frequency for incremental training')
+    parser.add_argument('--resume-from', type=int, default=None,
+                        help='Resume incremental training from chunk index')
     args = parser.parse_args()  # Parse the command-line arguments
     
     logger.info(f"Starting trading bot in {args.mode} mode")  # Log the starting mode
@@ -211,6 +223,41 @@ def main():
         model.continue_training(df, exchange, symbol, timeframe)
         
         logger.info("Model training continued successfully")
+    elif args.mode == 'incremental':
+        # Get the required parameters
+        if not symbols or not timeframes:
+            logger.error("Incremental training requires symbols and timeframes")
+            sys.exit(1)
+        
+        # Get additional parameters
+        chunk_size = args.chunk_size if hasattr(args, 'chunk_size') else 50000
+        test_size = args.test_size if hasattr(args, 'test_size') else 0.001
+        overlap = args.overlap if hasattr(args, 'overlap') else 5000
+        max_memory = args.max_memory if hasattr(args, 'max_memory') else 4000
+        checkpoint_freq = args.checkpoint_freq if hasattr(args, 'checkpoint_freq') else 1
+        resume_from = args.resume_from if hasattr(args, 'resume_from') else None
+        
+        # Get model type from config
+        model_type = config.get('model', {}).get('type', 'enhanced_bayesian')
+        
+        logger.info(f"Starting incremental training for {symbols} {timeframes} using {model_type}")
+        
+        # Process each symbol and timeframe combination
+        for symbol in symbols:
+            for timeframe in timeframes:
+                logger.info(f"Training incrementally on {symbol} {timeframe}")
+                train_incrementally(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    exchange=exchange,
+                    model_type=model_type,
+                    chunk_size=chunk_size,
+                    test_size=test_size,
+                    overlap=overlap,
+                    max_memory_mb=max_memory,
+                    checkpoint_frequency=checkpoint_freq,
+                    resume_from=resume_from
+                )
     elif args.mode == 'backtest':
         # Create the appropriate tester based on command-line arguments
         if args.walk_forward:

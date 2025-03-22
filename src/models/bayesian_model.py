@@ -23,6 +23,7 @@ from sklearn.model_selection import TimeSeriesSplit
 import pickle
 import json
 import matplotlib.pyplot as plt
+from ..utils.result_logger import ResultLogger
 class BayesianModel:
     """
     Bayesian model for trading signals using ordered logistic regression
@@ -157,7 +158,7 @@ class BayesianModel:
         self.trace = trace
         return model, trace
     
-    def train(self, exchange='binance', symbol='BTC/USDT', timeframe='1m', test_size=0.3):
+    def train(self, exchange='binance', symbol='BTC/USDT', timeframe='1m', test_size=0.3, custom_df=None):
         """
         Train the model on processed data with proper train-test split
         
@@ -181,20 +182,28 @@ class BayesianModel:
         self.logger.info(f"Training model for {exchange} {symbol} {timeframe} with train-test split")
         
         try:
-            # Load processed data
+            # Create a safe version of the symbol for file paths
             symbol_safe = symbol.replace('/', '_')
-            input_file = Path(f"data/processed/{exchange}/{symbol_safe}/{timeframe}.csv")
             
-            if not input_file.exists():
-                self.logger.error(f"No processed data file found at {input_file}")
-                return False
+            # Use custom dataframe if provided, otherwise load from file
+            if custom_df is not None:
+                df = custom_df.copy()
+                self.logger.info(f"Using provided DataFrame with {len(df)} samples")
+            else:
+                # Load processed data
+                input_file = Path(f"data/processed/{exchange}/{symbol_safe}/{timeframe}.csv")
                 
-            df = pd.read_csv(input_file, index_col='timestamp', parse_dates=True)
+                if not input_file.exists():
+                    self.logger.error(f"No processed data file found at {input_file}")
+                    return False
+                    
+                df = pd.read_csv(input_file, index_col='timestamp', parse_dates=True)
             
-            # Create target - must be done before splitting to avoid data leakage
+            # Create target if not already present - must be done before splitting to avoid data leakage 
             # (target creation uses future data for each point)
-            self.logger.info("Creating target variables")
-            df['target'] = self.create_target(df)
+            if 'target' not in df.columns:
+                self.logger.info("Creating target variables")
+                df['target'] = self.create_target(df)
             
             # Drop rows with NaN targets (occurs at the end due to forward window)
             df = df.dropna(subset=['target'])
@@ -206,13 +215,14 @@ class BayesianModel:
             
             self.logger.info(f"Split data into training ({len(train_df)} samples) and test ({len(test_df)} samples)")
             
-            # Save test data for later evaluation
-            test_output_dir = Path(f"data/test_sets/{exchange}/{symbol_safe}")
-            test_output_dir.mkdir(parents=True, exist_ok=True)
+            # Save test set for later evaluation if test_size > 0
+            if test_size > 0 and len(test_df) > 0:
+                test_output_dir = Path(f"data/test_sets/{exchange}/{symbol_safe}")
+                test_output_dir.mkdir(parents=True, exist_ok=True)
             
-            test_output_file = test_output_dir / f"{timeframe}_test.csv"
-            test_df.to_csv(test_output_file)
-            self.logger.info(f"Saved test set to {test_output_file}")
+                test_output_file = test_output_dir / f"{timeframe}_test.csv"
+                test_df.to_csv(test_output_file)
+                self.logger.info(f"Saved test set to {test_output_file}")
             
             # Prepare training data
             X_train = train_df[self.feature_cols].values
@@ -585,7 +595,7 @@ class BayesianModel:
             self.logger.error(traceback.format_exc())
             return False
 
-    def save_model(self, exchange, symbol, timeframe):
+    def save_model(self, exchange, symbol, timeframe, suffix=None):
         """
         Save the trained model
         
@@ -609,18 +619,24 @@ class BayesianModel:
             
             # Create safe path elements
             symbol_safe = symbol.replace('/', '_')
+        
+            # Add suffix if provided
+            filename_base = f"{exchange}_{symbol_safe}_{timeframe}"
+            if suffix:
+                filename_base += f"{suffix}"
             
             # Save scaler
-            scaler_path = model_dir / f"{exchange}_{symbol_safe}_{timeframe}_scaler.pkl"
+            scaler_path = model_dir / f"{filename_base}_scaler.pkl"
             with open(scaler_path, 'wb') as f:
                 pickle.dump(self.scaler, f)
             
-            # Save trace (posterior samples)
-            trace_path = model_dir / f"{exchange}_{symbol_safe}_{timeframe}_trace.netcdf"
-            az.to_netcdf(self.trace, trace_path)
+            # Save trace (posterior samples) if available
+            if self.trace is not None:
+                trace_path = model_dir / f"{filename_base}_trace.netcdf"
+                az.to_netcdf(self.trace, trace_path)
             
             # Save feature columns list
-            feat_cols_path = model_dir / f"{exchange}_{symbol_safe}_{timeframe}_feature_cols.pkl"
+            feat_cols_path = model_dir / f"{filename_base}_feature_cols.pkl"
             with open(feat_cols_path, 'wb') as f:
                 pickle.dump(self.feature_cols, f)
             
@@ -631,7 +647,7 @@ class BayesianModel:
             self.logger.error(f"Error saving model: {str(e)}")
             return False
     
-    def load_model(self, exchange, symbol, timeframe):
+    def load_model(self, exchange, symbol, timeframe, suffix=None):
         """
         Load a trained model
         
@@ -652,6 +668,11 @@ class BayesianModel:
             # Create paths
             model_dir = Path("models")
             symbol_safe = symbol.replace('/', '_')
+        
+            # Add suffix if provided
+            filename_base = f"{exchange}_{symbol_safe}_{timeframe}"
+            if suffix:
+                filename_base += f"{suffix}"
             
             scaler_path = model_dir / f"{exchange}_{symbol_safe}_{timeframe}_scaler.pkl"
             trace_path = model_dir / f"{exchange}_{symbol_safe}_{timeframe}_trace.netcdf"
@@ -846,7 +867,7 @@ class BayesianModel:
         try:
             # Create output directory
             symbol_safe = symbol.replace('/', '_')
-            output_dir = Path(f"models/comparisons/{exchange}/{symbol_safe}")
+            output_dir = Path(f"data/backtest_results/position_sizing/{exchange}/{symbol_safe}")
             output_dir.mkdir(parents=True, exist_ok=True)
             
             # Create figure with 2 subplots

@@ -25,22 +25,14 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import TimeSeriesSplit
 import pickle
 import json
-import matplotlib.pyplot as plt
+import time
+import matplotlib
+matplotlib.use('Agg')
+plt = matplotlib.pyplot
 
-# Set memory management for GPU training
-try:
-    import pytensor
-    import os
-    # Only run if we're using CUDA
-    if 'cuda' in pytensor.config.device:
-        logging.info("Configuring PyTensor GPU memory management")
-        # Limit memory usage to avoid OOM errors
-        pytensor.config.gpuarray.preallocate = 0.8
-        os.environ["OMP_NUM_THREADS"] = "4"  # Control CPU threads for better GPU utilization
-except ImportError:
-    pass
+from .bayesian_model import BayesianModel
 
-class EnhancedBayesianModel:
+class EnhancedBayesianModel(BayesianModel):
     """
     Enhanced Bayesian model for trading signals with robust evaluation
     
@@ -51,77 +43,11 @@ class EnhancedBayesianModel:
     """
     
     def __init__(self, config):
-        """
-        Initialize with configuration
-        
-        Args:
-            config (dict): Configuration dictionary containing model parameters,
-                            fee rates, and target thresholds
-        """
+        """Initialize with configuration"""
+        super().__init__(config)
         self.logger = logging.getLogger(__name__)
-        self.config = config
-        self.model = None
-        self.trace = None
-        self.scaler = StandardScaler()
-        
-        # Extract model parameters from config
-        self.fee_rate = self.config.get('backtesting', {}).get('fee_rate', 0.0006)
-        self.min_profit = self.config.get('backtesting', {}).get('min_profit_target', 0.008)
-        
-        # Feature columns to use for prediction - can be configured from config file
-        self.feature_cols = self.config.get('model', {}).get('feature_cols', [
-            'bb_pos', 'RSI_14', 'MACDh_12_26_9', 'trend_strength', 
-            'volatility', 'volume_ratio', 'range', 'macd_hist_diff', 
-            'rsi_diff', 'bb_squeeze'
-        ])
-    
-    def create_target(self, df, forward_window=20):
-        """
-        Create target variable for training
-        
-        This method looks forward in time to identify profitable trading opportunities,
-        accounting for transaction fees. The target values are:
-        -1 = Short opportunity (profitable short trade)
-        0 = No trade opportunity (neither long nor short is profitable)
-        1 = Long opportunity (profitable long trade)
-        
-        Args:
-            df (DataFrame): Price data with OHLCV columns
-            forward_window (int): Number of periods to look ahead for profit opportunities
-            
-        Returns:
-            ndarray: Array of target values (-1, 0, or 1)
-        """
-        n_samples = len(df)
-        targets = np.zeros(n_samples)
-        
-        # Calculate total fee cost for round trip (entry + exit)
-        fee_cost = self.fee_rate * 2
-        
-        # For each point in time, look forward to find profitable trades
-        for i in range(n_samples - forward_window):
-            entry_price = df['close'].iloc[i]
-            future_prices = df['close'].iloc[i+1:i+forward_window+1].values
-            
-            # Calculate potential returns for long positions
-            # Formula: (exit_price / entry_price) - 1 - fees
-            long_returns = future_prices / entry_price - 1 - fee_cost
-            max_long_return = np.max(long_returns) if len(long_returns) > 0 else -np.inf
-            
-            # Calculate potential returns for short positions
-            # Formula: 1 - (exit_price / entry_price) - fees
-            short_returns = 1 - (future_prices / entry_price) - fee_cost
-            max_short_return = np.max(short_returns) if len(short_returns) > 0 else -np.inf
-            
-            # Determine the optimal trade direction based on maximum potential return
-            if max_long_return >= self.min_profit and max_long_return > max_short_return:
-                targets[i] = 1  # Long opportunity
-            elif max_short_return >= self.min_profit and max_short_return > max_long_return:
-                targets[i] = -1  # Short opportunity
-            else:
-                targets[i] = 0  # No trade opportunity
-        
-        return targets
+        # Flag for monitoring performance
+        self.performance_metrics = {}
     
     def build_model(self, X_train, y_train):
         """
@@ -138,6 +64,8 @@ class EnhancedBayesianModel:
         Returns:
             tuple: (model, trace) - PyMC model and sampling trace
         """
+        # Note: This method might be replaced by the factory if JAX acceleration is available
+
         # Adjust y_train to be 0, 1, 2 instead of -1, 0, 1 for ordered logistic
         y_train_adj = y_train + 1
         
@@ -146,8 +74,12 @@ class EnhancedBayesianModel:
         n_classes = len(unique_classes)
         
         # Check current PyTensor configuration
-        self.logger.info(f"PyTensor device: {pytensor.config.device}")
-        self.logger.info(f"PyTensor floatX: {pytensor.config.floatX}")
+        try:
+            import pytensor
+            self.logger.info(f"PyTensor device: {pytensor.config.device}")
+            self.logger.info(f"PyTensor floatX: {pytensor.config.floatX}")
+        except:
+            self.logger.info("Could not check PyTensor configuration")
         
         # Try to build the model with robust error handling
         try:
@@ -167,6 +99,8 @@ class EnhancedBayesianModel:
                 
                 # Modern MCMC sampling with PyMC
                 self.logger.info("Starting MCMC sampling...")
+                start_time = time.time()
+                
                 trace = pm.sample(
                     draws=800,
                     tune=500,
@@ -174,6 +108,13 @@ class EnhancedBayesianModel:
                     target_accept=0.9,
                     compute_convergence_checks=False
                 )
+                
+                end_time = time.time()
+                sampling_time = end_time - start_time
+                self.logger.info(f"Sampling completed in {sampling_time:.2f} seconds")
+                
+                # Store performance metrics
+                self.performance_metrics['sampling_time'] = sampling_time
             
             self.model = model
             self.trace = trace
@@ -197,6 +138,8 @@ class EnhancedBayesianModel:
                 
                 # Very conservative sampling settings
                 self.logger.info("Using conservative fallback sampling settings")
+                start_time = time.time()
+                
                 fallback_trace = pm.sample(
                     draws=600,
                     tune=1000,
@@ -208,98 +151,18 @@ class EnhancedBayesianModel:
                     discard_tuned_samples=True,
                     compute_convergence_checks=False
                 )
+                
+                end_time = time.time()
+                fallback_sampling_time = end_time - start_time
+                self.logger.info(f"Fallback sampling completed in {fallback_sampling_time:.2f} seconds")
+                
+                # Store performance metrics
+                self.performance_metrics['sampling_time'] = fallback_sampling_time
+                self.performance_metrics['used_fallback'] = True
             
             self.model = fallback_model
             self.trace = fallback_trace
             return fallback_model, fallback_trace
-    
-    def train(self, exchange='binance', symbol='BTC/USDT', timeframe='1m', test_size=0.3, custom_df=None, reservoir_df=None):
-        """
-        Train the model on processed data with proper train-test split
-        
-        This implementation:
-        1. Loads the data
-        2. Creates chronological train-test split (last 30% for testing by default)
-        3. Creates target variables
-        4. Saves the test set separately
-        5. Trains the model on training data only
-        6. Saves the model
-        
-        Args:
-            exchange (str): Exchange name
-            symbol (str): Trading pair symbol
-            timeframe (str): Data timeframe
-            test_size (float): Proportion of data to use for testing (0.0-1.0)
-            custom_df (DataFrame, optional): Custom DataFrame to use instead of loading from file
-            reservoir_df (DataFrame, optional): Reservoir sampled DataFrame to use for training
-            
-        Returns:
-            tuple: (train_df, test_df) if successful, False otherwise
-        """
-        self.logger.info(f"Training model for {exchange} {symbol} {timeframe} with train-test split")
-        
-        try:
-            # Use provided dataframe or load from file
-            if custom_df is not None:
-                df = custom_df.copy()
-                self.logger.info(f"Using custom DataFrame with {len(df)} samples")
-            elif reservoir_df is not None:
-                df = reservoir_df.copy()
-                self.logger.info(f"Using reservoir DataFrame with {len(df)} samples")
-            else:
-                # Load processed data
-                symbol_safe = symbol.replace('/', '_')
-                input_file = Path(f"data/processed/{exchange}/{symbol_safe}/{timeframe}.csv")
-                
-                if not input_file.exists():
-                    self.logger.error(f"No processed data file found at {input_file}")
-                    return False
-                    
-                df = pd.read_csv(input_file, index_col='timestamp', parse_dates=True)
-            
-            # Create target - must be done before splitting to avoid data leakage
-            self.logger.info("Creating target variables")
-            df['target'] = self.create_target(df)
-            
-            # Drop rows with NaN targets (occurs at the end due to forward window)
-            df = df.dropna(subset=['target'])
-            
-            # Chronological train-test split - using the last part for testing
-            train_size = int(len(df) * (1 - test_size))
-            train_df = df.iloc[:train_size].copy()
-            test_df = df.iloc[train_size:].copy()
-            
-            self.logger.info(f"Split data into training ({len(train_df)} samples) and test ({len(test_df)} samples)")
-            
-            # Save test data for later evaluation
-            symbol_safe = symbol.replace('/', '_')
-            test_output_dir = Path(f"data/test_sets/{exchange}/{symbol_safe}")
-            test_output_dir.mkdir(parents=True, exist_ok=True)
-            test_output_file = test_output_dir / f"{timeframe}_test.csv"
-            test_df.to_csv(test_output_file)
-            self.logger.info(f"Saved test set to {test_output_file}")
-            
-            # Prepare training data
-            X_train = train_df[self.feature_cols].values
-            y_train = train_df['target'].values
-            
-            # Scale features (fit only on training data to avoid data leakage)
-            X_train_scaled = self.scaler.fit_transform(X_train)
-            
-            # Build and train model on training data only
-            self.logger.info("Building Bayesian model...")
-            self.build_model(X_train_scaled, y_train)
-            
-            # Save model
-            self.save_model(exchange, symbol, timeframe)
-            
-            return train_df, test_df
-            
-        except Exception as e:
-            self.logger.error(f"Error training model: {str(e)}")
-            import traceback
-            self.logger.error(traceback.format_exc())
-            return False
     
     def train_with_cv(self, exchange='binance', symbol='BTC/USDT', timeframe='1h', 
                                 test_size=0.2, n_splits=5, gap=0):
@@ -325,6 +188,10 @@ class EnhancedBayesianModel:
             tuple: (train_val_df, test_df, cv_results) if successful, False otherwise
         """
         self.logger.info(f"Training model for {exchange} {symbol} {timeframe} with time-series CV")
+
+        # Before starting, log JAX status
+        if self.using_jax_acceleration:
+            self.logger.info("Using JAX acceleration for cross-validation training")
         
         try:
             # Load processed data
@@ -650,14 +517,16 @@ class EnhancedBayesianModel:
             self.logger.error(traceback.format_exc())
             return False
     
-    def save_model(self, exchange, symbol, timeframe):
+    def save_model(self, exchange, symbol, timeframe, suffix=None):
         """
-        Save the trained model
+        Save the trained model with enhanced metadata
         
-        Saves all components needed for prediction:
+        Saves all components needed for prediction, plus additional metrics:
         - Scaler for feature normalization
         - Trace (posterior samples) from PyMC
         - Feature column list
+        - Performance metrics
+        - JAX acceleration status
         
         Args:
             exchange (str): Exchange name
@@ -668,42 +537,47 @@ class EnhancedBayesianModel:
             bool: True if successful, False otherwise
         """
         try:
-            # Create directory
+            # First call the parent class method
+            result = super().save_model(exchange, symbol, timeframe)
+            if not result:
+                return False
+                
+            # Add enhanced model specific data
             model_dir = Path("models")
-            model_dir.mkdir(exist_ok=True)
-            
-            # Create safe path elements
             symbol_safe = symbol.replace('/', '_')
+
+            # Add suffix if provided
+            filename_base = f"{exchange}_{symbol_safe}_{timeframe}"
+            if suffix:
+                filename_base += f"{suffix}"
             
-            # Save scaler
-            scaler_path = model_dir / f"{exchange}_{symbol_safe}_{timeframe}_scaler.pkl"
-            with open(scaler_path, 'wb') as f:
-                pickle.dump(self.scaler, f)
+            # Save performance metrics
+            metrics_path = model_dir / f"{filename_base}_metrics.json"  
+
+            # Combine performance metrics with acceleration info
+            combined_metrics = self.performance_metrics.copy()
+            combined_metrics['using_jax_acceleration'] = getattr(self, 'using_jax_acceleration', False)
+            combined_metrics['model_type'] = 'enhanced_bayesian'
             
-            # Save trace (posterior samples)
-            trace_path = model_dir / f"{exchange}_{symbol_safe}_{timeframe}_trace.netcdf"
-            az.to_netcdf(self.trace, trace_path)
+            with open(metrics_path, 'w') as f:
+                json.dump(combined_metrics, f, indent=2)
             
-            # Save feature columns list
-            feat_cols_path = model_dir / f"{exchange}_{symbol_safe}_{timeframe}_feature_cols.pkl"
-            with open(feat_cols_path, 'wb') as f:
-                pickle.dump(self.feature_cols, f)
-            
-            self.logger.info(f"Model saved to {model_dir}")
+            self.logger.info(f"Enhanced model metrics saved to {metrics_path}")
             return True
             
         except Exception as e:
-            self.logger.error(f"Error saving model: {str(e)}")
+            self.logger.error(f"Error saving enhanced model: {str(e)}")
             return False
     
-    def load_model(self, exchange, symbol, timeframe):
+    def load_model(self, exchange, symbol, timeframe, suffix=None):
         """
-        Load a trained model
+        Load a trained model with enhanced metadata
         
-        Loads all components needed for prediction:
+        Loads all components needed for prediction, plus additional metrics:
         - Scaler for feature normalization
         - Trace (posterior samples) from PyMC
         - Feature column list (if available)
+        - Performance metrics (if available)
         
         Args:
             exchange (str): Exchange name
@@ -714,31 +588,37 @@ class EnhancedBayesianModel:
             bool: True if successful, False otherwise
         """
         try:
-            # Create paths
+            # First call the parent class method
+            result = super().load_model(exchange, symbol, timeframe)
+            if not result:
+                return False
+                
+            # Load enhanced model specific data
             model_dir = Path("models")
             symbol_safe = symbol.replace('/', '_')
+        
+            # Add suffix if provided
+            filename_base = f"{exchange}_{symbol_safe}_{timeframe}"
+            if suffix:
+                filename_base += f"{suffix}"
             
-            scaler_path = model_dir / f"{exchange}_{symbol_safe}_{timeframe}_scaler.pkl"
-            trace_path = model_dir / f"{exchange}_{symbol_safe}_{timeframe}_trace.netcdf"
-            feat_cols_path = model_dir / f"{exchange}_{symbol_safe}_{timeframe}_feature_cols.pkl"
+            # Load performance metrics if available
+            metrics_path = model_dir / f"{filename_base}_metrics.json"
+            if metrics_path.exists():
+                with open(metrics_path, 'r') as f:
+                    self.performance_metrics = json.load(f)
+                    
+                # Check if this model was trained with JAX acceleration
+                self.using_jax_acceleration = self.performance_metrics.get('using_jax_acceleration', False)
+                
+                self.logger.info(f"Loaded enhanced model metrics from {metrics_path}")
+                if self.using_jax_acceleration:
+                    self.logger.info("This model was trained with JAX acceleration")
             
-            # Load scaler
-            with open(scaler_path, 'rb') as f:
-                self.scaler = pickle.load(f)
-            
-            # Load trace
-            self.trace = az.from_netcdf(trace_path)
-            
-            # Load feature columns if available
-            if feat_cols_path.exists():
-                with open(feat_cols_path, 'rb') as f:
-                    self.feature_cols = pickle.load(f)
-            
-            self.logger.info(f"Model loaded from {model_dir}")
             return True
             
         except Exception as e:
-            self.logger.error(f"Error loading model: {str(e)}")
+            self.logger.error(f"Error loading enhanced model: {str(e)}")
             return False
     
     def predict_probabilities(self, df_or_X):
@@ -1003,6 +883,9 @@ class EnhancedBayesianModel:
             bool: True if successful, False otherwise
         """
         self.logger.info(f"Training enhanced model on multiple symbols and timeframes")
+        # Log JAX status at the beginning
+        if self.using_jax_acceleration:
+            self.logger.info("Using JAX acceleration for multi-symbol training")
         
         # Lists to store all training data
         all_X = []
@@ -1377,8 +1260,11 @@ class EnhancedBayesianModel:
             # Process new data
             self.logger.info(f"Continuing training with {len(new_data_df)} new samples")
             
-            # Create target for new data
-            new_data_df['target'] = self.create_target(new_data_df)
+            # Create target for new data if not present
+            if 'target' not in new_data_df.columns:
+                self.logger.info("Creating target variables for new data")
+                new_data_df['target'] = self.create_target(new_data_df)
+            
             new_data_df = new_data_df.dropna(subset=['target'])
             
             # Extract feature columns
@@ -1492,7 +1378,9 @@ class EnhancedBayesianModel:
         Returns:
             tuple: (train_df, test_df) if successful, False otherwise
         """
-        self.logger.info(f"Training with reservoir sampling for {exchange} {symbol} {timeframe}")
+        self.logger.info(f"Training with reservoir sampling for {exchange} {symbol} {timeframe}")# Log JAX status at the beginning
+        if self.using_jax_acceleration:
+            self.logger.info("Using JAX acceleration for training with reservoir")
         
         try:
             # Check if we already have a reservoir
@@ -1576,7 +1464,9 @@ class EnhancedBayesianModel:
         Returns:
             tuple: (train_df, test_df) if successful, False otherwise
         """
-        self.logger.info(f"Training with time-weighted sampling for {exchange} {symbol} {timeframe}")
+        self.logger.info(f"Training with time-weighted sampling for {exchange} {symbol} {timeframe}")# Log JAX status at the beginning
+        if self.using_jax_acceleration:
+            self.logger.info("Using JAX acceleration for training with time weighting")
         
         try:
             # If no data provided, load from file
@@ -1619,3 +1509,408 @@ class EnhancedBayesianModel:
             import traceback
             self.logger.error(traceback.format_exc())
             return False
+        
+    def run_backtest_with_position_sizing(self, df, exchange='binance', symbol='BTC/USDT', 
+                                            timeframe='15m', no_trade_threshold=0.96, 
+                                            min_position_change=0.025, compound_returns=True):
+        """
+        Run backtest with continuous position sizing based on probability distributions
+    
+        This implementation:
+        1. Treats long and short positions separately (can have both simultaneously)
+        2. Position sizes directly correspond to probability values 
+        3. Only updates positions when probability changes exceed threshold
+        4. Optionally compounds returns to grow/shrink position sizes
+        
+        Args:
+            df (DataFrame): Price data with OHLCV columns
+            exchange (str): Exchange name
+            symbol (str): Trading pair symbol
+            timeframe (str): Data timeframe
+            no_trade_threshold (float): Threshold for no_trade probability to ignore signals
+            min_position_change (float): Minimum position change to avoid fee churn
+            compound_returns (bool): Whether to compound returns for position sizing
+            
+        Returns:
+            tuple: (results_df, metrics, fig) with backtest results, performance metrics, and visualization
+        """
+        self.logger.info(f"Running position sizing backtest for {symbol} {timeframe}")
+        
+        try:
+            # 1. Get probabilistic predictions
+            probabilities = self.predict_probabilities(df)
+            
+            if probabilities is None:
+                self.logger.error("Failed to get probability predictions")
+                return False
+                
+            # 2. Create a copy of the dataframe for backtesting
+            results = df.copy()
+            
+            # 3. Add probability columns
+            results['short_prob'] = probabilities[:, 0]
+            results['no_trade_prob'] = probabilities[:, 1]
+            results['long_prob'] = probabilities[:, 2]
+            
+            # 4. Calculate raw position sizes directly from probabilities
+            # Ignore probabilities if no_trade is high
+            results['raw_long_position'] = np.where(
+                results['no_trade_prob'] >= no_trade_threshold,
+                0,  # No position when no_trade probability is high
+                results['long_prob']  # Otherwise use long probability directly
+            )
+            
+            results['raw_short_position'] = np.where(
+                results['no_trade_prob'] >= no_trade_threshold,
+                0,  # No position when no_trade probability is high
+                results['short_prob']  # Otherwise use short probability directly
+            )
+        
+            # 5. Initialize compounding factor (starting with 1.0 = 100% of base size)
+            if compound_returns:
+                results['compound_factor'] = 1.0
+            
+            # 6. Apply minimum change threshold to avoid fee churn
+            # Handle each position type separately
+            results['long_position'] = 0.0
+            results['short_position'] = 0.0
+            prev_long = 0.0
+            prev_short = 0.0
+            
+            # 7. Calculate price return
+            results['price_return'] = results['close'].pct_change()
+            
+            # 8. Loop through data and calculate positions with optional compounding
+            for i in range(len(results)):
+                # Apply compounding from previous period if enabled
+                compound_factor = 1.0
+                if compound_returns and i > 0:
+                    # Use compounding factor from previous period
+                    compound_factor = results.iloc[i-1]['compound_factor']
+                    
+                    # Calculate net position from previous period
+                    prev_long_actual = results.iloc[i-1]['long_position'] 
+                    prev_short_actual = results.iloc[i-1]['short_position']
+                    
+                    # Calculate return from previous period
+                    if i > 1:  # Need at least 2 previous periods for returns
+                        price_return = results.iloc[i-1]['price_return']
+                        if not np.isnan(price_return):
+                            long_return = prev_long_actual * price_return
+                            short_return = -1 * prev_short_actual * price_return
+                            total_return = long_return + short_return
+                            
+                            # Apply fees
+                            fee_rate = 0.0006  # 0.06%
+                            long_change = abs(results.iloc[i-1]['long_position'] - results.iloc[i-2]['long_position'])
+                            short_change = abs(results.iloc[i-1]['short_position'] - results.iloc[i-2]['short_position'])
+                            fee_impact = (long_change + short_change) * fee_rate
+                            
+                            # Update compound factor
+                            compound_factor *= (1 + total_return - fee_impact)
+                            
+                            # Store updated compound factor
+                            results.iloc[i, results.columns.get_loc('compound_factor')] = compound_factor
+                
+                # Long position logic with compounding
+                raw_long = results.iloc[i]['raw_long_position']
+                if compound_returns:
+                    # Scale by compound factor
+                    raw_long_scaled = raw_long * compound_factor
+                else:
+                    raw_long_scaled = raw_long
+                    
+                # Apply minimum change threshold
+                if abs(raw_long_scaled - prev_long) >= min_position_change:
+                    new_long = raw_long_scaled
+                else:
+                    new_long = prev_long
+                
+                results.iloc[i, results.columns.get_loc('long_position')] = new_long
+                prev_long = new_long
+                
+                # Short position logic with compounding
+                raw_short = results.iloc[i]['raw_short_position']
+                if compound_returns:
+                    # Scale by compound factor
+                    raw_short_scaled = raw_short * compound_factor
+                else:
+                    raw_short_scaled = raw_short
+                
+                # Apply minimum change threshold
+                if abs(raw_short_scaled - prev_short) >= min_position_change:
+                    new_short = raw_short_scaled
+                else:
+                    new_short = prev_short
+                
+                results.iloc[i, results.columns.get_loc('short_position')] = new_short
+                prev_short = new_short
+            
+            # 9. Calculate net position (for compatibility)
+            results['position'] = results['long_position'] - results['short_position']
+            
+            # 10. Calculate separate returns for long and short positions
+            results['long_return'] = results['long_position'].shift(1) * results['price_return']
+            results['short_return'] = -1 * results['short_position'].shift(1) * results['price_return']  # Negative for shorts
+            results['strategy_return'] = results['long_return'] + results['short_return']
+            
+            # 11. Add fee impact - fees are proportional to position change
+            fee_rate = 0.0006  # Typical fee of 0.06%
+            results['long_change'] = results['long_position'].diff().abs()
+            results['short_change'] = results['short_position'].diff().abs()
+            results['fee_impact'] = (results['long_change'] + results['short_change']) * fee_rate
+            
+            # 12. Net returns after fees
+            results['net_return'] = results['strategy_return'] - results['fee_impact']
+            
+            # 13. Calculate cumulative returns
+            results['price_cumulative'] = (1 + results['price_return']).cumprod() - 1
+            results['strategy_cumulative'] = (1 + results['net_return']).cumprod() - 1
+            
+            # 14. Calculate separate cumulative returns for long and short
+            results['long_cumulative'] = (1 + results['long_return']).cumprod() - 1
+            results['short_cumulative'] = (1 + results['short_return']).cumprod() - 1
+            
+            # 15. Calculate performance metrics
+            metrics = self._calculate_position_sizing_metrics(results, min_position_change)
+            
+            # Add compounding information to metrics
+            if compound_returns:
+                metrics['compound_returns'] = True
+                metrics['final_compound_factor'] = results['compound_factor'].iloc[-1]
+                metrics['max_compound_factor'] = results['compound_factor'].max()
+                metrics['min_compound_factor'] = results['compound_factor'].min()
+                metrics['max_position_size'] = max(
+                    results['long_position'].max(),
+                    results['short_position'].max()
+                )
+            else:
+                metrics['compound_returns'] = False
+            
+            # 16. Create visualization using result logger
+            from ..utils.result_logger import ResultLogger
+            result_logger = ResultLogger(getattr(self, 'config', {}))
+
+            # Save results to standardized formats
+            files = result_logger.save_results(
+                results, metrics, exchange, symbol, timeframe, 
+                strategy_type='position_sizing', data_source='test_set'
+            )
+
+            # Create visualizations
+            viz_files = result_logger.plot_results(
+                results, metrics, exchange, symbol, timeframe, 
+                strategy_type='position_sizing', data_source='test_set'
+            )
+            
+            # Add visualization paths to metrics
+            metrics['visualization_files'] = viz_files
+            
+            # Return results
+            fig = None  # The ResultLogger already saved the figures
+            return results, metrics, fig
+            
+        except Exception as e:
+            self.logger.error(f"Error in position sizing backtest: {str(e)}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            return False, False, False
+
+    def _calculate_position_sizing_metrics(self, results, min_position_change):
+        """
+        Calculate performance metrics for position sizing backtest
+        
+        Args:
+            results (DataFrame): Backtest results dataframe
+            
+        Returns:
+            dict: Dictionary of performance metrics
+        """
+        # Filter out rows with NaN returns
+        valid_results = results.dropna(subset=['net_return'])
+        
+        if len(valid_results) < 2:
+            return {'error': 'Not enough valid data points'}
+        
+        # Get final returns
+        final_price_return = valid_results['price_cumulative'].iloc[-1]
+        final_strategy_return = valid_results['strategy_cumulative'].iloc[-1]
+        final_long_return = valid_results['long_cumulative'].iloc[-1] if 'long_cumulative' in valid_results.columns else 0
+        final_short_return = valid_results['short_cumulative'].iloc[-1] if 'short_cumulative' in valid_results.columns else 0
+        
+        # Calculate Sharpe ratio (annualized)
+        # Assuming daily data, adjust for other timeframes
+        timeframe_multiplier = {
+            '1m': 365 * 24 * 60,
+            '5m': 365 * 24 * 12,
+            '15m': 365 * 24 * 4,
+            '30m': 365 * 24 * 2,
+            '1h': 365 * 24,
+            '4h': 365 * 6,
+            '1d': 365,
+            '1w': 52
+        }
+        
+        # Default to daily if timeframe not recognized
+        multiplier = timeframe_multiplier.get('1d', 365)
+        
+        returns_mean = valid_results['net_return'].mean()
+        returns_std = valid_results['net_return'].std()
+        sharpe = (returns_mean / returns_std) * np.sqrt(multiplier) if returns_std > 0 else 0
+        
+        # Calculate max drawdown
+        cum_returns = valid_results['strategy_cumulative']
+        running_max = cum_returns.cummax()
+        drawdown = (cum_returns - running_max) / (1 + running_max)
+        max_drawdown = drawdown.min()
+        
+        # Calculate win rate
+        daily_returns = valid_results.resample('D')['net_return'].sum().dropna()
+        win_rate = (daily_returns > 0).mean()
+        
+        # Calculate profit factor
+        winning_days = daily_returns[daily_returns > 0].sum()
+        losing_days = abs(daily_returns[daily_returns < 0].sum())
+        profit_factor = winning_days / losing_days if losing_days != 0 else float('inf')
+        
+        # Calculate alpha (excess return over buy & hold)
+        alpha = final_strategy_return - final_price_return
+        
+        # Calculate fee impact
+        total_fees = valid_results['fee_impact'].sum()
+        total_return_before_fees = (1 + valid_results['strategy_return']).cumprod().iloc[-1] - 1
+        total_return_after_fees = (1 + valid_results['net_return']).cumprod().iloc[-1] - 1
+        fee_drag = total_return_before_fees - total_return_after_fees
+        
+        # Count number of position changes
+        long_changes = (valid_results['long_change'] > min_position_change).sum() if 'long_change' in valid_results.columns else 0
+        short_changes = (valid_results['short_change'] > min_position_change).sum() if 'short_change' in valid_results.columns else 0
+        
+        # Position exposure metrics
+        long_exposure = valid_results['long_position'].mean()
+        short_exposure = valid_results['short_position'].mean()
+        net_exposure = long_exposure - short_exposure
+        
+        # Calculate long-only metrics
+        if 'long_return' in valid_results.columns:
+            long_returns = valid_results['long_return']
+            long_win_rate = (long_returns > 0).mean() if (valid_results['long_position'] > 0).any() else 0
+            long_sharpe = (long_returns.mean() / long_returns.std()) * np.sqrt(multiplier) if long_returns.std() > 0 else 0
+        else:
+            long_win_rate = 0
+            long_sharpe = 0
+        
+        # Calculate short-only metrics
+        if 'short_return' in valid_results.columns:
+            short_returns = valid_results['short_return']
+            short_win_rate = (short_returns > 0).mean() if (valid_results['short_position'] > 0).any() else 0
+            short_sharpe = (short_returns.mean() / short_returns.std()) * np.sqrt(multiplier) if short_returns.std() > 0 else 0
+        else:
+            short_win_rate = 0
+            short_sharpe = 0
+        
+        # Create metrics dictionary
+        metrics = {
+            'total_return': final_strategy_return,
+            'buy_hold_return': final_price_return,
+            'long_only_return': final_long_return,
+            'short_only_return': final_short_return,
+            'alpha': alpha,
+            'sharpe_ratio': sharpe,
+            'long_sharpe': long_sharpe,
+            'short_sharpe': short_sharpe,
+            'max_drawdown': max_drawdown,
+            'win_rate': win_rate,
+            'long_win_rate': long_win_rate,
+            'short_win_rate': short_win_rate,
+            'profit_factor': profit_factor,
+            'long_changes': long_changes,
+            'short_changes': short_changes,
+            'total_position_changes': long_changes + short_changes,
+            'fee_drag': fee_drag,
+            'total_trading_days': len(daily_returns),
+            'long_exposure': long_exposure,
+            'short_exposure': short_exposure,
+            'net_exposure': net_exposure,
+            'avg_long_size': valid_results[valid_results['long_position'] > 0]['long_position'].mean() if (valid_results['long_position'] > 0).any() else 0,
+            'avg_short_size': valid_results[valid_results['short_position'] > 0]['short_position'].mean() if (valid_results['short_position'] > 0).any() else 0
+        }
+        
+        return metrics
+
+    # def _plot_position_sizing_results(self, results, symbol, timeframe):
+    #     """
+    #     Create visualization of position sizing backtest results
+        
+    #     Args:
+    #         results (DataFrame): Backtest results dataframe
+    #         symbol (str): Trading pair symbol
+    #         timeframe (str): Data timeframe
+            
+    #     Returns:
+    #         Figure: Matplotlib figure with backtest visualization
+    #     """
+    #     try:
+    #         # Import the visualization tool
+    #         from src.visualization.visualization import VisualizationTool
+            
+    #         # Create a visualization tool instance
+    #         # Create a minimal config if self.config is not available
+    #         config = getattr(self, 'config', {'logging': {'level': 'INFO'}})
+    #         viz_tool = VisualizationTool(config)
+            
+    #         # Format results for the visualization tool
+    #         formatted_results = {
+    #             'data': results,
+    #             'symbol': symbol,
+    #             'timeframe': timeframe,
+    #             'stats': {
+    #                 'win_rate': (results['net_return'] > 0).mean() if 'net_return' in results.columns else 0,
+    #                 'final_return': results['strategy_cumulative'].iloc[-1] if 'strategy_cumulative' in results.columns else 0,
+    #                 'long_trades': (results['position'] > 0).sum(),
+    #                 'short_trades': (results['position'] < 0).sum(),
+    #                 'hedged_trades': 0,  # Position sizing doesn't use hedging
+    #                 'avg_win': results.loc[results['net_return'] > 0, 'net_return'].mean() 
+    #                         if (results['net_return'] > 0).any() else 0,
+    #                 'avg_loss': results.loc[results['net_return'] < 0, 'net_return'].mean() 
+    #                         if (results['net_return'] < 0).any() else 0,
+    #                 'profit_factor': abs(results.loc[results['net_return'] > 0, 'net_return'].sum() / 
+    #                                 results.loc[results['net_return'] < 0, 'net_return'].sum())
+    #                                 if (results['net_return'] < 0).any() and 
+    #                                 (results['net_return'] > 0).any() else float('inf')
+    #             }
+    #         }
+            
+    #         # Create output directory
+    #         symbol_safe = symbol.replace('/', '_')
+    #         output_dir = Path(f"data/backtest_results/position_sizing/{symbol_safe}")
+    #         output_dir.mkdir(parents=True, exist_ok=True)
+            
+    #         # Plot and save the results
+    #         output_file = output_dir / f"{timeframe}_position_sizing.png"
+    #         fig = viz_tool.plot_backtest_results(formatted_results, output_file, continuous_position=True)
+            
+    #         # Also create a metrics chart
+    #         metrics_file = output_dir / f"{timeframe}_position_sizing_metrics.png"
+    #         viz_tool.plot_performance_metrics(formatted_results, metrics_file)
+            
+    #         # Create probability distribution chart if probabilities are available
+    #         if all(col in results.columns for col in ['long_prob', 'short_prob', 'no_trade_prob']):
+    #             prob_file = output_dir / f"{timeframe}_position_sizing_probabilities.png"
+    #             viz_tool.plot_probability_distribution(formatted_results, prob_file)
+            
+    #         # Log success
+    #         self.logger.info(f"Position sizing visualizations saved to {output_dir}")
+            
+    #         return fig
+            
+    #     except Exception as e:
+    #         self.logger.error(f"Error plotting position sizing results: {str(e)}")
+    #         import traceback
+    #         self.logger.error(traceback.format_exc())
+            
+    #         # Return a minimal figure as fallback
+    #         fig, ax = plt.subplots(figsize=(8, 5))
+    #         ax.text(0.5, 0.5, f"Error creating plot: {str(e)}", 
+    #                 ha='center', va='center', transform=ax.transAxes)
+    #         return fig

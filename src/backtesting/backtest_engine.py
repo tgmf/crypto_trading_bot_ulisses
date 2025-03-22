@@ -27,6 +27,7 @@ from datetime import datetime
 import json
 
 from ..models.model_factory import ModelFactory
+from ..utils.result_logger import ResultLogger
 
 class BacktestEngine:
     """Engine for backtesting trading strategies"""
@@ -43,6 +44,10 @@ class BacktestEngine:
         self.logger = logging.getLogger(__name__)
         # Extract fee rate from config or use default value
         self.fee_rate = self.config.get('backtesting', {}).get('fee_rate', 0.0006)
+        self.exit_threshold = self.config.get('backtesting', {}).get('exit_threshold', 0.03)
+        
+        # Create result logger instance for consistent output
+        self.result_logger = ResultLogger(config)
         
     def run_test(self, exchange='binance', symbol='BTC/USDT', timeframe='1m'):
         """
@@ -126,7 +131,7 @@ class BacktestEngine:
             self.logger.error(traceback.format_exc())
             return False
     
-    def _run_quantum_backtest(self, df, probabilities, threshold=0.5, hedge_threshold=0.3):
+    def _run_quantum_backtest(self, df, probabilities, threshold=0.05, hedge_threshold=0.03):
         """
         Run backtest with quantum-inspired trading approach
         
@@ -142,8 +147,8 @@ class BacktestEngine:
         Args:
             df (DataFrame): Price data DataFrame with OHLCV data
             probabilities (ndarray): Probability array [P(short), P(no_trade), P(long)]
-            threshold (float): Minimum probability to enter a position (default: 0.5)
-            hedge_threshold (float): Threshold for considering hedging (default: 0.3)
+            threshold (float): Minimum probability to enter a position (default: 0.05)
+            hedge_threshold (float): Threshold for considering hedging (default: 0.03)
             
         Returns:
             tuple: (df_backtest, stats) - DataFrame with backtest results and performance statistics
@@ -204,7 +209,7 @@ class BacktestEngine:
             
             elif position == 1:  # Currently long
                 # Check for exit or hedge signals
-                if long_prob < 0.3 or short_prob > threshold:
+                if long_prob < self.exit_threshold or short_prob > threshold:
                     # Exit long position if long probability drops or short probability rises
                     df_backtest.loc[df_backtest.index[i], 'exit_price'] = current_price
                     df_backtest.loc[df_backtest.index[i], 'position'] = 0
@@ -237,7 +242,7 @@ class BacktestEngine:
             
             elif position == -1:  # Currently short
                 # Check for exit or hedge signals
-                if short_prob < 0.3 or long_prob > threshold:
+                if short_prob < self.exit_threshold or long_prob > threshold:
                     # Exit short position if short probability drops or long probability rises
                     df_backtest.loc[df_backtest.index[i], 'exit_price'] = current_price
                     df_backtest.loc[df_backtest.index[i], 'position'] = 0
@@ -771,7 +776,7 @@ class BacktestEngine:
             return False
         
     def run_position_sizing_test(self, exchange='binance', symbol='BTC/USDT', timeframe='1h', 
-                                    no_trade_threshold=0.96, min_position_change=0.05):
+                                    no_trade_threshold=0.96, min_position_change=0.025):
         """
         Run a backtest with quantum position sizing instead of traditional binary signals.
         
@@ -828,7 +833,7 @@ class BacktestEngine:
             # Run backtest with position sizing (delegates to the model's method)
             # Check if the model class has the position sizing method
             if hasattr(model, 'run_backtest_with_position_sizing'):
-                results, metrics, fig = model.run_backtest_with_position_sizing(
+                return_value = model.run_backtest_with_position_sizing(
                     df, 
                     exchange=exchange,
                     symbol=symbol,
@@ -836,6 +841,19 @@ class BacktestEngine:
                     no_trade_threshold=no_trade_threshold,
                     min_position_change=min_position_change
                 )
+                
+                # Handle different return formats
+                if isinstance(return_value, tuple):
+                    if len(return_value) == 2:
+                        # Model only returned results and metrics, no figure
+                        results, metrics = return_value
+                        fig = None
+                    else:
+                        # Model returned all three values
+                        results, metrics, fig = return_value
+                else:
+                    # Model returned a single value or False
+                    return return_value
                 
                 # Add data source information
                 if isinstance(metrics, dict):
@@ -845,7 +863,7 @@ class BacktestEngine:
             else:
                 self.logger.error("Model does not support position sizing backtest")
                 return False
-                
+        
         except Exception as e:
             self.logger.error(f"Error during position sizing test: {str(e)}")
             import traceback
