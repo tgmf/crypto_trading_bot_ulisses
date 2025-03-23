@@ -229,23 +229,47 @@ def main():
             logger.error("Incremental training requires symbols and timeframes")
             sys.exit(1)
         
-        # Get additional parameters
-        chunk_size = args.chunk_size if hasattr(args, 'chunk_size') else 50000
-        test_size = args.test_size if hasattr(args, 'test_size') else 0.001
-        overlap = args.overlap if hasattr(args, 'overlap') else 2500
-        max_memory = args.max_memory if hasattr(args, 'max_memory') else 8000
-        checkpoint_freq = args.checkpoint_freq if hasattr(args, 'checkpoint_freq') else 1
+        # Get training configs
+        training_config = config.get('training', {})
+        incremental_config = training_config.get('incremental_training', {})
+        
+        # Get parameters with precedence: command line > config file > hardcoded defaults
+        test_size = args.test_size if hasattr(args, 'test_size') and args.test_size is not None else \
+                    training_config.get('test_size', 0.001)
+        max_memory = args.max_memory if hasattr(args, 'max_memory') and args.max_memory is not None else \
+                    training_config.get('max_memory_mb', 8000)
+                
+        chunk_size = args.chunk_size if hasattr(args, 'chunk_size') and args.chunk_size is not None else \
+                    incremental_config.get('chunk_size', 50000)
+        
+        overlap = args.overlap if hasattr(args, 'overlap') and args.overlap is not None else \
+                    incremental_config.get('overlap', 2500)
+        
+        checkpoint_freq = args.checkpoint_freq if hasattr(args, 'checkpoint_freq') and args.checkpoint_freq is not None else \
+                        incremental_config.get('checkpoint_frequency', 1)
+                        
         resume_from = args.resume_from if hasattr(args, 'resume_from') else None
         
-        # Get model type from config
-        model_type = config.get('model', {}).get('type', 'enhanced_bayesian')
+        # Get model type with precedence: command line > incremental config > general model config
+        model_type = args.model if args.model else \
+                    incremental_config.get('model_type', config.get('model', {}).get('type', 'enhanced_bayesian'))
         
         logger.info(f"Starting incremental training for {symbols} {timeframes} using {model_type}")
+        
+        # Log the configuration we're using
+        logger.info(f"Starting incremental training with configuration:")
+        logger.info(f"  Model type: {model_type}")
+        logger.info(f"  Chunk size: {chunk_size} samples")
+        logger.info(f"  Test size: {test_size}")
+        logger.info(f"  Chunk overlap: {overlap} samples")
+        logger.info(f"  Max memory: {max_memory} MB")
+        logger.info(f"  Checkpoint frequency: {checkpoint_freq} chunks")
+        logger.info(f"  Resume from: {resume_from if resume_from is not None else 'beginning'}")
+        
         
         # Process each symbol and timeframe combination
         for symbol in symbols:
             for timeframe in timeframes:
-                logger.info(f"Training incrementally on {symbol} {timeframe}")
                 train_incrementally(
                     symbol=symbol,
                     timeframe=timeframe,

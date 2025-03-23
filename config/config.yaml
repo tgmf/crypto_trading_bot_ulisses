@@ -16,7 +16,7 @@ data:
 # Model Settings
 model:
   type: 'enhanced_bayesian'
-  max_samples_per_batch: 50000
+  max_samples_per_batch: 100000
   feature_cols:
     - bb_pos
     - RSI_14
@@ -31,13 +31,13 @@ model:
 
 training:
   memory_efficient: True
-
-incremental_training:
-  max_memory_mb: 8000  # 8GB memory limit
-  chunk_size: 100000
-  overlap: 5000
   test_size: 0.001     # Small test size
-  checkpoint_frequency: 1  # Save after each chunk
+  max_memory_mb: 8000  # 8GB memory limit
+
+  incremental_training:
+    chunk_size: 100000
+    overlap: 5000
+    checkpoint_frequency: 1  # Save after each chunk
   
 # Backtesting Settings
 backtesting:

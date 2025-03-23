@@ -1588,78 +1588,97 @@ class EnhancedBayesianModel(BayesianModel):
             results['price_return'] = results['close'].pct_change()
             
             # 9. Loop through data and calculate positions with optional compounding
+            compound_factor = 1.0  # Start with base sizing
+            realized_pnl = 0.0     # Track realized P&L for compounding
+            prev_long = 0.0
+            prev_short = 0.0
+            
             for i in range(len(results)):
-                # Apply compounding from previous period if enabled
-                compound_factor = 1.0
-                if compound_returns and i > 0:
-                    # Use compounding factor from previous period
-                    compound_factor = results.iloc[i-1]['compound_factor']
-                    
-                    # Calculate net position from previous period
-                    prev_long_actual = results.iloc[i-1]['long_position'] 
-                    prev_short_actual = results.iloc[i-1]['short_position']
-                    
-                    # Calculate return from previous period
-                    if i > 1:  # Need at least 2 previous periods for returns
-                        price_return = results.iloc[i-1]['price_return']
-                        if not np.isnan(price_return):
-                            long_return = prev_long_actual * price_return
-                            short_return = -1 * prev_short_actual * price_return
-                            total_return = long_return + short_return
-                            
-                            # Apply fees
-                            fee_rate = 0.0006  # 0.06%
-                
-                            # Safely calculate position changes
-                            if i > 2:
-                                long_change = abs(results.iloc[i-1]['long_position'] - results.iloc[i-2]['long_position'])
-                                short_change = abs(results.iloc[i-1]['short_position'] - results.iloc[i-2]['short_position'])
-                            else:
-                                # For the first rows, use position directly as the change
-                                long_change = results.iloc[i-1]['long_position']
-                                short_change = results.iloc[i-1]['short_position']
-                            
-                            fee_impact = (long_change + short_change) * fee_rate
-                            
-                            # Update compound factor
-                            compound_factor *= (1 + total_return - fee_impact)
-                            
-                            # Store updated compound factor
-                            results.iloc[i, results.columns.get_loc('compound_factor')] = compound_factor
-                
-                # Long position logic with compounding
+                # Get raw position signals based on probabilities
                 raw_long = results.iloc[i]['raw_long_position']
-                if compound_returns:
-                    # Scale by compound factor
-                    raw_long_scaled = raw_long * compound_factor
-                else:
-                    raw_long_scaled = raw_long
-                    
-                # Apply minimum change threshold
-                if abs(raw_long_scaled - prev_long) >= min_position_change:
-                    new_long = raw_long_scaled
-                else:
-                    new_long = prev_long
-                
-                results.iloc[i, results.columns.get_loc('long_position')] = new_long
-                prev_long = new_long
-                
-                # Short position logic with compounding
                 raw_short = results.iloc[i]['raw_short_position']
+                
                 if compound_returns:
-                    # Scale by compound factor
-                    raw_short_scaled = raw_short * compound_factor
+                    # Apply current compound factor to raw positions
+                    raw_long_sized = raw_long * compound_factor
+                    raw_short_sized = raw_short * compound_factor
                 else:
-                    raw_short_scaled = raw_short
-                
-                # Apply minimum change threshold
-                if abs(raw_short_scaled - prev_short) >= min_position_change:
-                    new_short = raw_short_scaled
-                else:
-                    new_short = prev_short
-                
-                results.iloc[i, results.columns.get_loc('short_position')] = new_short
-                prev_short = new_short
+                    raw_long_sized = raw_long
+                    raw_short_sized = raw_short
+    
+                    # Calculate potential position changes
+                    long_change = abs(raw_long_sized - prev_long)
+                    short_change = abs(raw_short_sized - prev_short)
+                    
+                    # Apply position changes only if they exceed minimum threshold
+                    if long_change >= min_position_change:
+                        # Position is changing - ONLY NOW do we realize P&L and compound
+                        if i > 0 and prev_long > 0:
+                            # Calculate P&L from previous position
+                            price_return = results.iloc[i-1]['price_return'] if i > 1 else 0
+                            if not np.isnan(price_return):
+                                # Calculate P&L on the CLOSED portion of the position
+                                closed_size = abs(raw_long_sized - prev_long)
+                                direction = 1 if raw_long_sized < prev_long else -1  # Reducing or increasing
+                                pnl_from_price = prev_long * price_return
+                            
+                                # We realize P&L proportional to position adjustment
+                                realized_pnl_long = pnl_from_price * (closed_size / prev_long) * direction
+                                
+                                # Apply fee for the position change
+                                fee_impact = closed_size * 0.0006  # 0.06% fee
+                                
+                                # Update compound factor ONLY on position changes
+                                realized_pnl += realized_pnl_long - fee_impact
+                        
+                        # Update long position
+                        new_long = raw_long_sized
+                    else:
+                        # No change to long position
+                        new_long = prev_long
+                            
+                            
+                    # Same logic for short positions
+                    if short_change >= min_position_change:
+                        # Position is changing - ONLY NOW do we realize P&L and compound
+                        if i > 0 and prev_short > 0:
+                            # Calculate P&L from previous position (shorts gain when price falls)
+                            price_return = results.iloc[i-1]['price_return'] if i > 1 else 0
+                            if not np.isnan(price_return):
+                                # Calculate P&L on the CLOSED portion of the position
+                                closed_size = abs(raw_short_sized - prev_short)
+                                direction = 1 if raw_short_sized < prev_short else -1  # Reducing or increasing
+                                pnl_from_price = -prev_short * price_return  # Negative for shorts
+                                
+                                # We realize P&L proportional to position adjustment
+                                realized_pnl_short = pnl_from_price * (closed_size / prev_short) * direction
+                                
+                                # Apply fee for the position change
+                                fee_impact = closed_size * 0.0006  # 0.06% fee
+                                
+                                # Update compound factor ONLY on position changes
+                                realized_pnl += realized_pnl_short - fee_impact
+                                
+                        # Update short position
+                        new_short = raw_short_sized
+                    else:
+                        # No change to short position
+                        new_short = prev_short
+                    
+                    # Update compound factor based on REALIZED pnl only
+                    if compound_returns and i > 0 and (long_change >= min_position_change or short_change >= min_position_change):
+                        # Only update compound factor when positions change
+                        compound_factor *= (1 + realized_pnl)
+                        realized_pnl = 0.0  # Reset realized P&L after compounding
+                    
+                    # Store positions and compound factor
+                    results.iloc[i, results.columns.get_loc('long_position')] = new_long
+                    results.iloc[i, results.columns.get_loc('short_position')] = new_short
+                    results.iloc[i, results.columns.get_loc('compound_factor')] = compound_factor
+                    
+                    # Update previous positions for next iteration
+                    prev_long = new_long
+                    prev_short = new_short
             
             # 10. Calculate net position (for compatibility)
             results['position'] = results['long_position'] - results['short_position']

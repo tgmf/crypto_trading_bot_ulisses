@@ -291,53 +291,6 @@ schedule>=1.2.0
 psutil>=5.9.0
 ```
 
-### Environment Selection in Model Factory
-
-The `model_factory.py` script has been updated to select the appropriate model based on the environment:
-
-```python
-def create_model(self):
-    """Create a model based on configuration"""
-    model_type = self.config.get('model', {}).get('type', 'bayesian')
-    
-    # Check if we're in the TensorFlow environment
-    try:
-        import tensorflow as tf
-        tf_available = True
-        self.logger.info(f"TensorFlow {tf.__version__} detected")
-    except ImportError:
-        tf_available = False
-    
-    # Check if we're in the PyMC environment
-    try:
-        import pymc as pm
-        pymc_available = True
-        self.logger.info(f"PyMC {pm.__version__} detected")
-    except ImportError:
-        pymc_available = False
-    
-    # Select model based on type and available packages
-    if model_type == 'tf_bayesian' and tf_available:
-        self.logger.info("Creating TensorFlow-based Bayesian model")
-        from .tf_bayesian_model import TFBayesianModel
-        return TFBayesianModel(self.config)
-    elif model_type == 'bayesian' and pymc_available:
-        self.logger.info("Creating PyMC-based Bayesian model")
-        from .bayesian_model import BayesianModel
-        return BayesianModel(self.config)
-    elif pymc_available:
-        self.logger.info(f"Unknown or unavailable model type: {model_type}, using PyMC-based Bayesian model")
-        from .bayesian_model import BayesianModel
-        return BayesianModel(self.config)
-    elif tf_available:
-        self.logger.info(f"PyMC not available but TensorFlow found, using TensorFlow-based Bayesian model")
-        from .tf_bayesian_model import TFBayesianModel
-        return TFBayesianModel(self.config)
-    else:
-        self.logger.error("Neither PyMC nor TensorFlow available. Please install either package.")
-        raise ImportError("Neither PyMC nor TensorFlow available. Please install either package.")
-```
-
 ### Sharing Models Between Environments
 
 Models trained in either environment can be shared via the saved model files. Since models are saved to disk and loaded based on file paths, a model trained in the TensorFlow environment can be used for prediction in the PyMC environment, and vice versa, through the respective loading functions.
@@ -393,3 +346,11 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - PyMC community for Bayesian modeling support
 - Contributors to the CCXT library for exchange connectivity
+
+## 👷🏾 ToDo
+
+- More models, better models! 
+- Check Multi-symbol/timeframe training and backtesting
+- Base Model class to handle basic methods across all the models
+- Agile feature engineering infrastructure
+- Better plotting utils
