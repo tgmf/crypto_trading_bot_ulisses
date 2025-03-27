@@ -56,26 +56,25 @@ class TFBayesianModel:
     Probability for Bayesian inference with GPU acceleration.
     """
     
-    def __init__(self, config):
+    def __init__(self, params):
         """
         Initialize with configuration
         
         Args:
-            config (dict): Configuration dictionary containing model parameters,
-                        fee rates, and target thresholds
+            params (dict): Instance of a parameter manager
         """
-        self.config = config
+        self.params = params
         self.logger = logging.getLogger(__name__)
         self.model = None
         self.posterior_samples = None
         self.scaler = StandardScaler()
         
-        # Extract model parameters from config
-        self.fee_rate = self.config.get('backtesting', {}).get('fee_rate', 0.0006)
-        self.min_profit = self.config.get('backtesting', {}).get('min_profit_target', 0.008)
+        # Extract model parameters from params
+        self.fee_rate = self.params.get('backtesting', 'fee_rate', default=0.0006)
+        self.min_profit = self.params.get('backtesting', 'min_profit_target', defulat=0.008)
         
         # Feature columns to use for prediction
-        self.feature_cols = self.config.get('model', {}).get('feature_cols', [
+        self.feature_cols = self.params.get('model', 'feature_cols', default=[
             'bb_pos', 'RSI_14', 'MACDh_12_26_9', 'trend_strength', 
             'volatility', 'volume_ratio', 'range', 'macd_hist_diff', 
             'rsi_diff', 'bb_squeeze'
@@ -1227,7 +1226,7 @@ class TFBayesianModel:
             self.logger.info("Evaluating both models for comparison")
             
             # Load the original model for comparison
-            original_model = self.__class__(self.config)
+            original_model = self.__class__(self.params)
             original_model.load_model(exchange, symbol, timeframe)
             
             # Test original model on original test set
@@ -1328,7 +1327,7 @@ class TFBayesianModel:
                 return None, None, None
             
             # Get fee rate from config
-            fee_rate = self.config.get('backtesting', {}).get('fee_rate', 0.0006)
+            fee_rate = self.params.get('backtesting', 'fee_rate', deafult=0.0006)
             
             # Initialize position sizer
             position_sizer = QuantumPositionSizer(

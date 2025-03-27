@@ -19,34 +19,34 @@ from pathlib import Path  # For handling file system paths
 class DataCollector:
     """Collects historical and real-time data from cryptocurrency exchanges and alternative sources"""
     
-    def __init__(self, config):
+    def __init__(self, params):
         """Initialize with configuration"""
-        self.config = config  # Store the configuration
+        self.params = params  # Store the configuration
         self.logger = logging.getLogger(__name__)  # Create a logger for this class
         self.exchanges = {}  # Dictionary to store exchange connections
         self._initialize_exchanges()  # Initialize exchange connections
         
     def _initialize_exchanges(self):
         """Initialize exchange connections"""
-        exchange_configs = self.config.get('data', {}).get('exchanges', [])  # Get exchange configurations from the config
+        exchanges = self.params.get('data', 'exchanges')  # Get exchange configurations from the config
         
-        for exchange_name in exchange_configs:
+        for exchange in exchanges:
             try:
                 # Initialize without authentication for historical data
-                exchange_class = getattr(ccxt, exchange_name)  # Get the exchange class from ccxt
-                self.exchanges[exchange_name] = exchange_class({
+                exchange_class = getattr(ccxt, exchange)  # Get the exchange class from ccxt
+                self.exchanges[exchange] = exchange_class({
                     'enableRateLimit': True,  # Enable rate limiting
                 })
-                self.logger.info(f"Initialized {exchange_name} connection")  # Log successful initialization
+                self.logger.info(f"Initialized {exchange} connection")  # Log successful initialization
             except Exception as e:
-                self.logger.error(f"Failed to initialize {exchange_name}: {str(e)}")  # Log any errors during initialization
+                self.logger.error(f"Failed to initialize {exchange}: {str(e)}")  # Log any errors during initialization
     
     def collect_data(self):
         """Collect historical data for configured symbols and timeframes"""
-        symbols = self.config.get('data', {}).get('symbols', [])  # Get symbols from the config
-        timeframes = self.config.get('data', {}).get('timeframes', [])  # Get timeframes from the config
-        start_date = self.config.get('data', {}).get('start_date', '2020-01-01')  # Get start date from the config
-        alt_sources = self.config.get('data', {}).get('alternative_sources', [])  # Get alternative data sources from the config
+        symbols = self.params.get('data', 'symbols')  # Get symbols from the config
+        timeframes = self.params.get('data', 'timeframes')  # Get timeframes from the config
+        start_date = self.params.get('data', 'start_date', default='2020-01-01')  # Get start date from the config
+        alt_sources = self.params.get('data', 'alternative_sources', default=[])  # Get alternative data sources from the config
         
         # Collect from exchanges
         self._collect_from_exchanges(symbols, timeframes, start_date)

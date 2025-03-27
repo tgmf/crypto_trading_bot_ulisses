@@ -25,14 +25,14 @@ class WalkForwardTester:
     3. Validates model robustness across different market conditions
     """
     
-    def __init__(self, config):
-        """Initialize with configuration"""
-        self.config = config
+    def __init__(self, params):
+        """Initialize with parameters manager"""
+        self.params = params
         self.logger = logging.getLogger(__name__)
-        self.fee_rate = self.config.get('backtesting', {}).get('fee_rate', 0.0006)
+        self.fee_rate = self.params.get('backtesting', 'fee_rate', default=0.0006)
         
         # Configuration for walk-forward testing
-        self.wf_config = self.config.get('walk_forward', {})
+        self.wf_config = self.params.get('walk_forward', default={})
         self.train_window = self.wf_config.get('train_window', 180)  # Training window in days
         self.test_window = self.wf_config.get('test_window', 30)     # Testing window in days
         self.step_size = self.wf_config.get('step_size', 30)         # Step size for rolling window in days
@@ -175,7 +175,7 @@ class WalkForwardTester:
             self.logger.info(f"Window {window_id}: Train set size = {len(train_df)}, Test set size = {len(test_df)}")
             
             # 2. Create model
-            model_factory = ModelFactory(self.config)
+            model_factory = ModelFactory(self.params)
             model = model_factory.create_model()
             
             # 3. Create target variable for training
@@ -518,11 +518,7 @@ class WalkForwardTester:
                 
                 try:
                     # Run walk-forward test for this symbol/timeframe
-                    results, performance = self.run_test(
-                        exchange=exchange,
-                        symbol=symbol,
-                        timeframe=timeframe
-                    )
+                    results, performance = self.run_test()
                     
                     # Store results if successful
                     if results is not False:

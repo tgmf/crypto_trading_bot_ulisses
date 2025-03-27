@@ -43,9 +43,9 @@ class EnhancedBayesianModel(BayesianModel):
     trading opportunities in three states: short (-1), neutral (0), and long (1).
     """
     
-    def __init__(self, config):
+    def __init__(self, params):
         """Initialize with configuration"""
-        super().__init__(config)
+        super().__init__(params)
         self.logger = logging.getLogger(__name__)
         # Flag for monitoring performance
         self.performance_metrics = {}
@@ -319,7 +319,7 @@ class EnhancedBayesianModel(BayesianModel):
             self.build_model(X_all_scaled, y_all)
             
             # 6. Save model
-            self.save_model(symbol, timeframe)
+            self.save_model()
             
             # Plot CV performance
             self._plot_cv_results(cv_results, symbol, timeframe)
@@ -413,7 +413,7 @@ class EnhancedBayesianModel(BayesianModel):
                 self.build_model(X_train_scaled, y_train)
                 
                 # Save original model
-                self.save_model(symbol, timeframe)
+                self.save_model()
                 self.logger.info("Original model trained and saved")
             
             # Now for the reversed training
@@ -441,14 +441,14 @@ class EnhancedBayesianModel(BayesianModel):
             self.build_model(X_train_reversed_scaled, y_train_reversed)
             
             # Save reversed model with indicator
-            self.save_model(symbol, timeframe, suffix="_reversed")
+            self.save_model(suffix="_reversed")
             
             # Evaluate original and reversed models
             self.logger.info("Evaluating both models for comparison")
             
             # Load the original model for comparison
-            original_model = self.__class__(self.config)
-            original_model.load_model(symbol, timeframe)
+            original_model = self.__class__(self.params)
+            original_model.load_model()
             
             # Test original model on original test set
             X_orig_test = test_df[self.feature_cols].values
@@ -518,7 +518,7 @@ class EnhancedBayesianModel(BayesianModel):
             self.logger.error(traceback.format_exc())
             return False
     
-    def save_model(self, symbol, timeframe, comment=None, suffix=None):
+    def save_model(self, suffix=None):
         """
         Save the trained model with enhanced metadata
         
@@ -538,9 +538,21 @@ class EnhancedBayesianModel(BayesianModel):
         Returns:
             bool: True if successful, False otherwise
         """
+        params = self.params
+        symbol = params.get('data', 'symbols', 0)
+        timeframe = params.get('data', 'timeframes', 0)
+        comment = params.get('model', 'comment', default=None)
+        version = params.get('model', 'version', default='latest')
+    
+        # Check for suffix in params (used only if argument is None)
+        param_suffix = params.get('model', 'suffix', default=None)
+    
+        # Use explicit argument if provided, otherwise use param_suffix
+        suffix = suffix if suffix is not None else param_suffix
+        
         try:
             # First call the parent class method
-            result, filename_base = super().save_model(symbol, timeframe, comment, suffix)
+            result, filename_base = super().save_model(suffix)
             if not result:
                 return False
                 
@@ -576,18 +588,9 @@ class EnhancedBayesianModel(BayesianModel):
             self.logger.error(f"Error saving enhanced model: {str(e)}")
             return False, None
     
-    def load_model(self, symbol, timeframe, timestamp=None, 
-                    comment=None, suffix=None, version='latest'):
+    def load_model(self):
         """
         Load a trained model using parent implementation
-        
-        Args:
-            symbol (str): Trading pair symbol
-            timeframe (str): Data timeframe
-            timestamp (str, optional): Timestamp to filter by
-            comment (str, optional): Comment to filter by
-            suffix (str, optional): Optional suffix for the model files
-            version (str): 'latest' or 'specific'
             
         Returns:
             bool: True if successful, False otherwise
@@ -596,8 +599,7 @@ class EnhancedBayesianModel(BayesianModel):
         self.performance_metrics = {}
         
         # Just use the parent class implementation
-        return super().load_model(symbol, timeframe, timestamp, 
-                                comment, suffix, version)
+        return super().load_model()
     
     def predict_probabilities(self, df_or_X):
         """
@@ -1272,7 +1274,7 @@ class EnhancedBayesianModel(BayesianModel):
                 self.trace = new_trace
                 
                 # Save updated model
-                self.save_model(symbol, timeframe)
+                self.save_model()
                 
                 return True
                 
@@ -1307,7 +1309,7 @@ class EnhancedBayesianModel(BayesianModel):
                 self.trace = fallback_trace
                 
                 # Save updated model
-                self.save_model(symbol, timeframe)
+                self.save_model()
                 
                 return True
             
@@ -1468,8 +1470,7 @@ class EnhancedBayesianModel(BayesianModel):
             self.logger.error(traceback.format_exc())
             return False
         
-    def run_backtest_with_position_sizing(self, df, exchange='binance', symbol='BTC/USDT', 
-                                            timeframe='15m', no_trade_threshold=0.96, 
+    def run_backtest_with_position_sizing(self, df, no_trade_threshold=0.96, 
                                             min_position_change=0.025, compound_returns=True, exaggerate=True):
         """
         Run backtest with continuous position sizing based on probability distributions
@@ -1483,9 +1484,6 @@ class EnhancedBayesianModel(BayesianModel):
         
         Args:
             df (DataFrame): Price data with OHLCV columns
-            exchange (str): Exchange name
-            symbol (str): Trading pair symbol
-            timeframe (str): Data timeframe
             no_trade_threshold (float): Threshold for no_trade probability to ignore signals
             min_position_change (float): Minimum position change to avoid fee churn
             compound_returns (bool): Whether to compound returns for position sizing
@@ -1494,6 +1492,11 @@ class EnhancedBayesianModel(BayesianModel):
         Returns:
             tuple: (results_df, metrics, fig) with backtest results, performance metrics, and visualization
         """
+        symbol = self.params.get('data', 'symbols', 0)
+        timeframe = self.params.get('data', 'timeframes', 0)
+        exaggerate = self.params.get('backtesting', 'exaggerate', default=exaggerate)
+        min_position_change = self.params.get('backtesting', 'min_position_change', default=min_position_change)
+        
         self.logger.info(f"Running position sizing backtest for {symbol} {timeframe}")
         
         try:
@@ -1606,79 +1609,79 @@ class EnhancedBayesianModel(BayesianModel):
                     raw_long_sized = raw_long
                     raw_short_sized = raw_short
     
-                    # Calculate potential position changes
-                    long_change = abs(raw_long_sized - prev_long)
-                    short_change = abs(raw_short_sized - prev_short)
-                    
-                    # Apply position changes only if they exceed minimum threshold
-                    if long_change >= min_position_change:
-                        # Position is changing - ONLY NOW do we realize P&L and compound
-                        if i > 0 and prev_long > 0:
-                            # Calculate P&L from previous position
-                            price_return = results.iloc[i-1]['price_return'] if i > 1 else 0
-                            if not np.isnan(price_return):
-                                # Calculate P&L on the CLOSED portion of the position
-                                closed_size = abs(raw_long_sized - prev_long)
-                                direction = 1 if raw_long_sized < prev_long else -1  # Reducing or increasing
-                                pnl_from_price = prev_long * price_return
-                            
-                                # We realize P&L proportional to position adjustment
-                                realized_pnl_long = pnl_from_price * (closed_size / prev_long) * direction
-                                
-                                # Apply fee for the position change
-                                fee_impact = closed_size * 0.0006  # 0.06% fee
-                                
-                                # Update compound factor ONLY on position changes
-                                realized_pnl += realized_pnl_long - fee_impact
+                # Calculate potential position changes
+                long_change = abs(raw_long_sized - prev_long)
+                short_change = abs(raw_short_sized - prev_short)
+                
+                # Apply position changes only if they exceed minimum threshold
+                if long_change >= min_position_change:
+                    # Position is changing - ONLY NOW do we realize P&L and compound
+                    if i > 0 and prev_long > 0:
+                        # Calculate P&L from previous position
+                        price_return = results.iloc[i-1]['price_return'] if i > 1 else 0
+                        if not np.isnan(price_return):
+                            # Calculate P&L on the CLOSED portion of the position
+                            closed_size = abs(raw_long_sized - prev_long)
+                            direction = 1 if raw_long_sized < prev_long else -1  # Reducing or increasing
+                            pnl_from_price = prev_long * price_return
                         
-                        # Update long position
-                        new_long = raw_long_sized
-                    else:
-                        # No change to long position
-                        new_long = prev_long
+                            # We realize P&L proportional to position adjustment
+                            realized_pnl_long = pnl_from_price * (closed_size / prev_long) * direction
                             
+                            # Apply fee for the position change
+                            fee_impact = closed_size * 0.0006  # 0.06% fee
                             
-                    # Same logic for short positions
-                    if short_change >= min_position_change:
-                        # Position is changing - ONLY NOW do we realize P&L and compound
-                        if i > 0 and prev_short > 0:
-                            # Calculate P&L from previous position (shorts gain when price falls)
-                            price_return = results.iloc[i-1]['price_return'] if i > 1 else 0
-                            if not np.isnan(price_return):
-                                # Calculate P&L on the CLOSED portion of the position
-                                closed_size = abs(raw_short_sized - prev_short)
-                                direction = 1 if raw_short_sized < prev_short else -1  # Reducing or increasing
-                                pnl_from_price = -prev_short * price_return  # Negative for shorts
-                                
-                                # We realize P&L proportional to position adjustment
-                                realized_pnl_short = pnl_from_price * (closed_size / prev_short) * direction
-                                
-                                # Apply fee for the position change
-                                fee_impact = closed_size * 0.0006  # 0.06% fee
-                                
-                                # Update compound factor ONLY on position changes
-                                realized_pnl += realized_pnl_short - fee_impact
-                                
-                        # Update short position
-                        new_short = raw_short_sized
-                    else:
-                        # No change to short position
-                        new_short = prev_short
+                            # Update compound factor ONLY on position changes
+                            realized_pnl += realized_pnl_long - fee_impact
                     
-                    # Update compound factor based on REALIZED pnl only
-                    if compound_returns and i > 0 and (long_change >= min_position_change or short_change >= min_position_change):
-                        # Only update compound factor when positions change
-                        compound_factor *= (1 + realized_pnl)
-                        realized_pnl = 0.0  # Reset realized P&L after compounding
-                    
-                    # Store positions and compound factor
-                    results.iloc[i, results.columns.get_loc('long_position')] = new_long
-                    results.iloc[i, results.columns.get_loc('short_position')] = new_short
-                    results.iloc[i, results.columns.get_loc('compound_factor')] = compound_factor
-                    
-                    # Update previous positions for next iteration
-                    prev_long = new_long
-                    prev_short = new_short
+                    # Update long position
+                    new_long = raw_long_sized
+                else:
+                    # No change to long position
+                    new_long = prev_long
+                        
+                        
+                # Same logic for short positions
+                if short_change >= min_position_change:
+                    # Position is changing - ONLY NOW do we realize P&L and compound
+                    if i > 0 and prev_short > 0:
+                        # Calculate P&L from previous position (shorts gain when price falls)
+                        price_return = results.iloc[i-1]['price_return'] if i > 1 else 0
+                        if not np.isnan(price_return):
+                            # Calculate P&L on the CLOSED portion of the position
+                            closed_size = abs(raw_short_sized - prev_short)
+                            direction = 1 if raw_short_sized < prev_short else -1  # Reducing or increasing
+                            pnl_from_price = -prev_short * price_return  # Negative for shorts
+                            
+                            # We realize P&L proportional to position adjustment
+                            realized_pnl_short = pnl_from_price * (closed_size / prev_short) * direction
+                            
+                            # Apply fee for the position change
+                            fee_impact = closed_size * 0.0006  # 0.06% fee
+                            
+                            # Update compound factor ONLY on position changes
+                            realized_pnl += realized_pnl_short - fee_impact
+                            
+                    # Update short position
+                    new_short = raw_short_sized
+                else:
+                    # No change to short position
+                    new_short = prev_short
+                
+                # Update compound factor based on REALIZED pnl only
+                if compound_returns and i > 0 and (long_change >= min_position_change or short_change >= min_position_change):
+                    # Only update compound factor when positions change
+                    compound_factor *= (1 + realized_pnl)
+                    realized_pnl = 0.0  # Reset realized P&L after compounding
+                
+                # Store positions and compound factor
+                results.iloc[i, results.columns.get_loc('long_position')] = new_long
+                results.iloc[i, results.columns.get_loc('short_position')] = new_short
+                results.iloc[i, results.columns.get_loc('compound_factor')] = compound_factor
+                
+                # Update previous positions for next iteration
+                prev_long = new_long
+                prev_short = new_short
             
             # 10. Calculate net position (for compatibility)
             results['position'] = results['long_position'] - results['short_position']
@@ -1696,14 +1699,14 @@ class EnhancedBayesianModel(BayesianModel):
             
             # 13. Net returns after fees
             results['net_return'] = results['strategy_return'] - results['fee_impact']
-            
+        
             # 14. Calculate cumulative returns
-            results['price_cumulative'] = (1 + results['price_return']).cumprod() - 1
-            results['strategy_cumulative'] = (1 + results['net_return']).cumprod() - 1
+            results['price_cumulative'] = (1 + results['price_return'].fillna(0)).cumprod() - 1
+            results['strategy_cumulative'] = (1 + results['net_return'].fillna(0)).cumprod() - 1
             
             # 15. Calculate separate cumulative returns for long and short
-            results['long_cumulative'] = (1 + results['long_return']).cumprod() - 1
-            results['short_cumulative'] = (1 + results['short_return']).cumprod() - 1
+            results['long_cumulative'] = (1 + results['long_return'].fillna(0)).cumprod() - 1
+            results['short_cumulative'] = (1 + results['short_return'].fillna(0)).cumprod() - 1
             
             # 16. Calculate performance metrics
             metrics = self._calculate_position_sizing_metrics(results, min_position_change)
@@ -1731,22 +1734,16 @@ class EnhancedBayesianModel(BayesianModel):
             
             # 17. Create visualization using result logger
             from ..utils.result_logger import ResultLogger
-            result_logger = ResultLogger(getattr(self, 'config', {}))
+            result_logger = ResultLogger(getattr(self, 'params', {}))
 
             # Strategy type suffix based on exaggeration
             strategy_type = 'position_sizing_exaggerated' if exaggerate else 'position_sizing'
 
             # Save results to standardized formats
-            files = result_logger.save_results(
-                results, metrics, exchange, symbol, timeframe, 
-                strategy_type=strategy_type, data_source='test_set'
-            )
+            files = result_logger.save_results(results, metrics, strategy_type=strategy_type)
 
             # Create visualizations
-            viz_files = result_logger.plot_results(
-                results, metrics, exchange, symbol, timeframe, 
-                strategy_type=strategy_type, data_source='test_set'
-            )
+            viz_files = result_logger.plot_results(results, metrics, strategy_type=strategy_type)
             
             # Add visualization paths to metrics
             metrics['visualization_files'] = viz_files
@@ -1783,6 +1780,9 @@ class EnhancedBayesianModel(BayesianModel):
         final_long_return = valid_results['long_cumulative'].iloc[-1] if 'long_cumulative' in valid_results.columns else 0
         final_short_return = valid_results['short_cumulative'].iloc[-1] if 'short_cumulative' in valid_results.columns else 0
         
+        # Get timeframe from params
+        timeframe = self.params.get('data', 'timeframes', 0)
+    
         # Calculate Sharpe ratio (annualized)
         # Assuming daily data, adjust for other timeframes
         timeframe_multiplier = {
@@ -1797,92 +1797,112 @@ class EnhancedBayesianModel(BayesianModel):
         }
         
         # Default to daily if timeframe not recognized
-        multiplier = timeframe_multiplier.get('1d', 365)
+        multiplier = timeframe_multiplier.get(timeframe, 365)
         
         returns_mean = valid_results['net_return'].mean()
         returns_std = valid_results['net_return'].std()
         sharpe = (returns_mean / returns_std) * np.sqrt(multiplier) if returns_std > 0 else 0
         
         # Calculate max drawdown
-        cum_returns = valid_results['strategy_cumulative']
-        running_max = cum_returns.cummax()
-        drawdown = (cum_returns - running_max) / (1 + running_max)
-        max_drawdown = drawdown.min()
+        cumulative = valid_results['strategy_cumulative'].values
+        max_dd, max_dd_duration = self._calculate_max_drawdown(cumulative)
+    
+        # Calculate position metrics
+        position_changes = np.sum(
+            (valid_results['long_position'].diff().abs() + valid_results['short_position'].diff().abs()) > min_position_change
+        )
+    
+        # Calculate trade metrics - a trade happens when position changes
+        long_changes = valid_results['long_position'].diff().abs() > min_position_change
+        short_changes = valid_results['short_position'].diff().abs() > min_position_change
         
-        # Calculate win rate
-        daily_returns = valid_results.resample('D')['net_return'].sum().dropna()
-        win_rate = (daily_returns > 0).mean()
-        
-        # Calculate profit factor
-        winning_days = daily_returns[daily_returns > 0].sum()
-        losing_days = abs(daily_returns[daily_returns < 0].sum())
-        profit_factor = winning_days / losing_days if losing_days != 0 else float('inf')
-        
-        # Calculate alpha (excess return over buy & hold)
-        alpha = final_strategy_return - final_price_return
-        
+        # Track returns on position changes
+        trade_returns = []
+        for i in range(1, len(valid_results)):
+            if long_changes.iloc[i] or short_changes.iloc[i]:
+                # Calculate return since last change
+                # This is a simplified approach - for precise returns we'd need entry/exit prices
+                # But this gives us a way to estimate trade-level metrics
+                trade_returns.append(valid_results['net_return'].iloc[i])
+            
+        # Calculate win rate and average win/loss
+        if trade_returns:
+            win_count = sum(ret > 0 for ret in trade_returns)
+            loss_count = sum(ret < 0 for ret in trade_returns)
+            win_rate = win_count / len(trade_returns) if len(trade_returns) > 0 else 0
+            
+            # Average win and loss
+            win_returns = [ret for ret in trade_returns if ret > 0]
+            loss_returns = [ret for ret in trade_returns if ret < 0]
+            
+            avg_win = sum(win_returns) / len(win_returns) if win_returns else 0
+            avg_loss = sum(loss_returns) / len(loss_returns) if loss_returns else 0
+            
+            # Profit factor
+            gross_profit = sum(win_returns)
+            gross_loss = abs(sum(loss_returns))
+            profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
+        else:
+            win_rate = 0
+            avg_win = 0
+            avg_loss = 0
+            profit_factor = 0
+    
         # Calculate fee impact
-        total_fees = valid_results['fee_impact'].sum()
-        total_return_before_fees = (1 + valid_results['strategy_return']).cumprod().iloc[-1] - 1
-        total_return_after_fees = (1 + valid_results['net_return']).cumprod().iloc[-1] - 1
-        fee_drag = total_return_before_fees - total_return_after_fees
+        total_fees = valid_results['fee_impact'].sum() if 'fee_impact' in valid_results.columns else 0
+        fee_drag = total_fees
+    
+        # Calculate other metrics
+        alpha = final_strategy_return - final_price_return  # Excess return over buy & hold
         
-        # Count number of position changes
-        long_changes = (valid_results['long_change'] > min_position_change).sum() if 'long_change' in valid_results.columns else 0
-        short_changes = (valid_results['short_change'] > min_position_change).sum() if 'short_change' in valid_results.columns else 0
-        
-        # Position exposure metrics
-        long_exposure = valid_results['long_position'].mean()
-        short_exposure = valid_results['short_position'].mean()
-        net_exposure = long_exposure - short_exposure
-        
-        # Calculate long-only metrics
-        if 'long_return' in valid_results.columns:
-            long_returns = valid_results['long_return']
-            long_win_rate = (long_returns > 0).mean() if (valid_results['long_position'] > 0).any() else 0
-            long_sharpe = (long_returns.mean() / long_returns.std()) * np.sqrt(multiplier) if long_returns.std() > 0 else 0
-        else:
-            long_win_rate = 0
-            long_sharpe = 0
-        
-        # Calculate short-only metrics
-        if 'short_return' in valid_results.columns:
-            short_returns = valid_results['short_return']
-            short_win_rate = (short_returns > 0).mean() if (valid_results['short_position'] > 0).any() else 0
-            short_sharpe = (short_returns.mean() / short_returns.std()) * np.sqrt(multiplier) if short_returns.std() > 0 else 0
-        else:
-            short_win_rate = 0
-            short_sharpe = 0
-        
-        # Create metrics dictionary
+        # Create metrics dictionary with ALL required keys
         metrics = {
-            'total_return': final_strategy_return,
+            'final_return': final_strategy_return,
             'buy_hold_return': final_price_return,
             'long_only_return': final_long_return,
             'short_only_return': final_short_return,
             'alpha': alpha,
             'sharpe_ratio': sharpe,
-            'long_sharpe': long_sharpe,
-            'short_sharpe': short_sharpe,
-            'max_drawdown': max_drawdown,
+            'max_drawdown': max_dd,
+            'max_dd_duration': max_dd_duration,
+            'total_trades': len(trade_returns),
+            'position_changes': position_changes,
             'win_rate': win_rate,
-            'long_win_rate': long_win_rate,
-            'short_win_rate': short_win_rate,
+            'avg_win': avg_win,
+            'avg_loss': avg_loss,
             'profit_factor': profit_factor,
-            'long_changes': long_changes,
-            'short_changes': short_changes,
-            'total_position_changes': long_changes + short_changes,
             'fee_drag': fee_drag,
-            'total_trading_days': len(daily_returns),
-            'long_exposure': long_exposure,
-            'short_exposure': short_exposure,
-            'net_exposure': net_exposure,
-            'avg_long_size': valid_results[valid_results['long_position'] > 0]['long_position'].mean() if (valid_results['long_position'] > 0).any() else 0,
-            'avg_short_size': valid_results[valid_results['short_position'] > 0]['short_position'].mean() if (valid_results['short_position'] > 0).any() else 0
+            'min_position_change': min_position_change
         }
         
         return metrics
 
+    def _calculate_max_drawdown(self, cumulative_returns):
+        """Calculate maximum drawdown and duration from cumulative returns array"""
+        # Check for valid input
+        if len(cumulative_returns) < 2:
+            return 0, 0
+            
+        # Starting with 1 + returns, not percentage form
+        cum_returns = 1 + np.array(cumulative_returns)
+        
+        # Calculate running maximum
+        running_max = np.maximum.accumulate(cum_returns)
+        
+        # Calculate drawdown in percentage terms
+        drawdown = (cum_returns - running_max) / running_max
+        
+        # Find the maximum drawdown
+        max_drawdown = np.min(drawdown)
+        
+        # Calculate drawdown duration
+        drawdown_start = np.argmax(cum_returns[:np.argmin(drawdown)])
+        drawdown_end = np.argmin(drawdown)
+        drawdown_duration = drawdown_end - drawdown_start
+        
+        return abs(max_drawdown), drawdown_duration
+    
+    
     # def _plot_position_sizing_results(self, results, symbol, timeframe):
     #     """
     #     Create visualization of position sizing backtest results

@@ -20,9 +20,9 @@ from datetime import datetime
 class BacktestAnalyzer:
     """Analyzes backtest results and generates summary statistics"""
     
-    def __init__(self, config=None):
+    def __init__(self, params=None):
         """Initialize with optional configuration"""
-        self.config = config or {}
+        self.params = params or {}
         self.logger = logging.getLogger(__name__)
     
     def find_latest_backtest(self, exchange, symbol, timeframe=None):

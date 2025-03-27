@@ -32,24 +32,24 @@ from ..utils.result_logger import ResultLogger
 class BacktestEngine:
     """Engine for backtesting trading strategies"""
     
-    def __init__(self, config):
+    def __init__(self, params):
         """
-        Initialize the backtest engine with configuration
+        Initialize the backtest engine with paramsuration
         
         Args:
-            config (dict): Configuration dictionary containing parameters for backtesting,
-                            such as fee rates, thresholds, and other settings
+            params (dict): ParamManager instance containing backtesting parameters
         """
-        self.config = config
+        self.params = params
         self.logger = logging.getLogger(__name__)
         # Extract fee rate from config or use default value
-        self.fee_rate = self.config.get('backtesting', {}).get('fee_rate', 0.0006)
-        self.exit_threshold = self.config.get('backtesting', {}).get('exit_threshold', 0.03)
+        # Extract fee rate and thresholds from params
+        self.fee_rate = self.params.get('backtesting', 'fee_rate', default=0.0006)
+        self.exit_threshold = self.params.get('backtesting', 'exit_threshold', default=0.03)
         
         # Create result logger instance for consistent output
-        self.result_logger = ResultLogger(config)
+        self.result_logger = ResultLogger(params)
         
-    def run_test(self, exchange='binance', symbol='BTC/USDT', timeframe='1m'):
+    def run_test(self):
         """
         Run backtest for a given model and dataset
         
@@ -61,20 +61,22 @@ class BacktestEngine:
         4. Generate predictions
         5. Execute trading logic
         6. Save and visualize results with data source tracking
-        
-        Args:
-            exchange (str): Exchange name (e.g., 'binance')
-            symbol (str): Trading pair symbol (e.g., 'BTC/USDT')
-            timeframe (str): Data timeframe (e.g., '1h')
             
         Returns:
-            tuple or bool: (backtest_results, stats) if successful, False otherwise
+            tuple or bool: (backtest_results, metrics) if successful, False otherwise
         """
+        params = self.params
+        exchange = params.get('data', 'exchanges', 0)
+        symbol = params.get('data', 'symbols', 0)
+        timeframe = params.get('data', 'timeframes', 0)
+        strategy = params.get('strategy', 'type', default='quantum')
+        
         self.logger.info(f"Running backtest for {exchange} {symbol} {timeframe}")
         
         try:
             # Check for test data first
             symbol_safe = symbol.replace('/', '_')
+            #TODO: test_sets_path should be a param
             test_file = Path(f"data/test_sets/{exchange}/{symbol_safe}/{timeframe}_test.csv")
             
             # If test data exists, use it (preferred for proper evaluation)
@@ -84,9 +86,10 @@ class BacktestEngine:
                 data_source = "test_set"  # Track the data source
             else:
                 # Fall back to processed data with a warning
-                self.logger.warning(f"No test set found. Using processed data instead. "
+                self.logger.warning(f"No test set found at {test_file}. Using processed data instead. "
                         f"This may lead to overoptimistic results due to possible data leakage.")
                 
+                #TODO: processed data path should be a param
                 input_file = Path(f"data/processed/{exchange}/{symbol_safe}/{timeframe}.csv")
                 
                 if not input_file.exists():
@@ -97,13 +100,15 @@ class BacktestEngine:
                 data_source = "full_data"  # Track the data source
             
             # Load model through the model factory
-            model_factory = ModelFactory(self.config)
+            model_factory = ModelFactory(self.params)
             model = model_factory.create_model()
             
-            if not model.load_model(symbol, timeframe):
+            if not model.load_model():
                 self.logger.error("Failed to load model for backtesting")
                 return False
             
+            # Make sure the dataframe is sorted by timestamp
+            df = df.sort_index()
             # Get predictions from the model
             probabilities = model.predict_probabilities(df)
             
@@ -111,19 +116,18 @@ class BacktestEngine:
                 self.logger.error("Failed to get predictions for backtesting")
                 return False
             
+            # TODO: implement switching between different strategies 
             # Run backtest with quantum-inspired approach
-            backtest_results, stats = self._run_quantum_backtest(df, probabilities)
+            backtest_results, metrics = self._run_quantum_backtest(df, probabilities)
+        
+            # Add data source to metrics
+            metrics['data_source'] = data_source
             
-            # Add data source information for transparent reporting
-            is_test_data = test_file.exists()
+            # Save and plot results
+            self.result_logger.save_results(backtest_results, metrics)
+            self.result_logger.plot_results(backtest_results, metrics)
             
-            # Save results with data source indicator for transparency
-            self._save_backtest_results(backtest_results, stats, symbol, timeframe, data_source)
-            
-            # Plot results with data source indicator
-            self._plot_backtest_results(backtest_results, symbol, timeframe, data_source)
-            
-            return backtest_results, stats
+            return backtest_results, metrics
             
         except Exception as e:
             self.logger.error(f"Error during backtesting: {str(e)}")
@@ -151,7 +155,7 @@ class BacktestEngine:
             hedge_threshold (float): Threshold for considering hedging (default: 0.03)
             
         Returns:
-            tuple: (df_backtest, stats) - DataFrame with backtest results and performance statistics
+            tuple: (df_backtest, metrics) - DataFrame with backtest results and performance statistics
         """
         df_backtest = df.copy()
         
@@ -340,7 +344,7 @@ class BacktestEngine:
         # Calculate trading statistics
         trades = df_backtest[~df_backtest['trade_return'].isna()]
         
-        stats = {
+        metrics = {
             'total_trades': len(trades),
             'long_trades': (trades['position'] == 1).sum(),
             'short_trades': (trades['position'] == -1).sum(),
@@ -358,383 +362,100 @@ class BacktestEngine:
             'final_return': df_backtest['strategy_cumulative'].iloc[-1]
         }
         
-        return df_backtest, stats
-    
-    def _save_backtest_results(self, results, stats, symbol, timeframe, data_source="full_data"):
-        """Save backtest results to CSV and stats to JSON"""
-        try:
-            # Create output directory
-            symbol_safe = symbol.replace('/', '_')
-            output_dir = Path(f"data/backtest_results/{symbol_safe}/{timeframe}")
-            output_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Generate timestamp
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            
-            # Save results with data source indicator
-            results_file = output_dir / f"{data_source}_{timestamp}.csv"
-            results.to_csv(results_file)
-            
-            # Save stats with data source indicator
-            stats_file = output_dir / f"{data_source}_{timestamp}_stats.csv"
-            stats_df = pd.DataFrame([stats])
-            
-            # Add data source information to stats
-            stats_df['data_source'] = data_source
-            stats_df.to_csv(stats_file, index=False)
-            
-            self.logger.info(f"Backtest results saved to {results_file}")
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Error saving backtest results: {str(e)}")
-            return False
-    
-    def _plot_backtest_results(self, results, symbol, timeframe, data_source="full_data"):
-        """Plot backtest results"""
-        try:
-            symbol_safe = symbol.replace('/', '_')
-            output_dir = Path(f"data/backtest_results/{symbol_safe}/{timeframe}")
-            output_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Generate timestamp
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            
-            # Create figure
-            fig, axes = plt.subplots(2, 1, figsize=(14, 10), gridspec_kw={'height_ratios': [2, 1]})
-            
-            # Add data source indicator to title
-            title_prefix = f"TEST SET - " if data_source == "test_set" else ""
-            
-            # Upper plot: Price with positions
-            axes[0].plot(results.index, results['close'], label=f'{symbol}', alpha=0.7)
-            
-            # Mark positions
-            long_entries = results[results['position'].diff() == 1]
-            short_entries = results[results['position'].diff() == -1]
-            hedged_entries = results[results['position'].diff() == 2]
-            exits = results[~results['exit_price'].isna()]
-            
-            # Plot position markers
-            axes[0].scatter(long_entries.index, long_entries['close'], marker='^', color='green', 
-                    s=100, label='Long Entry')
-            axes[0].scatter(short_entries.index, short_entries['close'], marker='v', color='red', 
-                    s=100, label='Short Entry')
-            axes[0].scatter(hedged_entries.index, hedged_entries['close'], marker='s', color='purple', 
-                    s=100, label='Hedged Position')
-            axes[0].scatter(exits.index, exits['close'], marker='x', color='black', 
-                    s=80, label='Exit')
-            
-            # Add probability shading for clarity (every 20th point to avoid clutter)
-            for i in range(0, len(results), 20):
-                if results['long_prob'].iloc[i] > 0.3:
-                    axes[0].axvspan(results.index[i], results.index[min(i+1, len(results)-1)], 
-                                  alpha=results['long_prob'].iloc[i] * 0.3, color='green', lw=0)
-                if results['short_prob'].iloc[i] > 0.3:
-                    axes[0].axvspan(results.index[i], results.index[min(i+1, len(results)-1)], 
-                                  alpha=results['short_prob'].iloc[i] * 0.3, color='red', lw=0)
-            
-            axes[0].set_title(f'{title_prefix}{symbol} {timeframe} Price with Trading Signals')
-            axes[0].set_ylabel('Price')
-            axes[0].legend()
-            axes[0].grid(True, alpha=0.3)
-            
-            # Lower plot: Cumulative returns
-            axes[1].plot(results.index, results['cumulative_returns'], label='Buy & Hold', color='blue')
-            axes[1].plot(results.index, results['strategy_cumulative'], label='Quantum Strategy', color='purple')
-            axes[1].set_title(f'{title_prefix}Strategy Performance')
-            axes[1].set_xlabel('Date')
-            axes[1].set_ylabel('Cumulative Returns')
-            axes[1].legend()
-            axes[1].grid(True, alpha=0.3)
-            
-            plt.tight_layout()
-            
-            # Save figure
-            plot_file = output_dir / f"{data_source}_{timestamp}_plot.png"
-            plt.savefig(plot_file)
-            plt.close(fig)
-            
-            self.logger.info(f"Backtest plot saved to {plot_file}")
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Error plotting backtest results: {str(e)}")
-            return False
+        return df_backtest, metrics
         
-    def run_multi_test(self, symbols, timeframes, exchange='binance'):
-        """Run backtest across multiple symbols and timeframes"""
+    def run_multi_test(self):
+        """
+        Run backtest across multiple symbols and timeframes using the latest trained model
+        
+        Returns:
+            dict: Results dictionary or False if error
+        """
+        
+        # Store symbols and timeframes in params
+        symbols = self.params.get('data', 'symbols')
+        timeframes = self.params.get('data', 'timeframes')
+        exchanges = self.params.get('data', 'exchanges')
+        
         self.logger.info(f"Running multi-symbol backtest for {len(symbols)} symbols and {len(timeframes)} timeframes")
-        
-        # Load the multi-symbol model
-        model_factory = ModelFactory(self.config)
-        model = model_factory.create_model()
-        
-        # Generate model name
-        model_name = model._generate_multi_model_name(symbols, timeframes)
-        
-        # Try to load the model
-        model_dir = Path("models/multi_symbol/")
-        scaler_path = model_dir / f"{model_name}_scaler.pkl"
-        trace_path = model_dir / f"{model_name}_trace.netcdf"
-        
-        if not scaler_path.exists() or not trace_path.exists():
-            self.logger.error(f"Multi-symbol model files not found. Please train the model first.")
-            return False
-        
-        # Load the model
-        with open(scaler_path, 'rb') as f:
-            model.scaler = pickle.load(f)
-        
-        model.trace = az.from_netcdf(trace_path)
         
         # Define a dictionary to store results
         all_results = {}
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         
-        # Run backtest for each symbol/timeframe
-        for symbol in symbols:
-            symbol_results = {}
-            for timeframe in timeframes:
-                try:
-                    # Check for test data first
-                    symbol_safe = symbol.replace('/', '_')
-                    test_file = Path(f"data/test_sets/{exchange}/{symbol_safe}/{timeframe}_test.csv")
-                    
-                    # If test data exists, use it (preferred for proper evaluation)
-                    if test_file.exists():
-                        self.logger.info(f"Using held-out test data for {symbol} {timeframe}")
-                        df = pd.read_csv(test_file, index_col='timestamp', parse_dates=True)
-                        data_source = "test_set"
-                    else:
-                        # Fall back to processed data with a warning
-                        self.logger.warning(f"No test set found for {symbol} {timeframe}. Using processed data instead.")
-                        
-                        input_file = Path(f"data/processed/{exchange}/{symbol_safe}/{timeframe}.csv")
-                        
-                        if not input_file.exists():
-                            self.logger.warning(f"No processed data file found at {input_file}")
+        # Run backtest for each exchange/symbol/timeframe
+        for exchange in exchanges:
+            exchange_results = {}
+            for symbol in symbols:
+                symbol_results = {}
+                for timeframe in timeframes:
+                    try:
+                        # Use the existing run_test method for each combination
+                        self.logger.info(f"Testing {exchange} {symbol} {timeframe}")
+                
+                        # Update params for this specific symbol/timeframe for model loading
+                        self.params.set([symbol], 'data', 'symbols')
+                        self.params.set([timeframe], 'data', 'timeframes')
+                
+                        # Run the individual backtest
+                        #TODO: run_test() called by multitest should not save and plot test results for each symbol/timeframe/exchange 
+                        backtest_results, metrics = self.run_test(exchange, symbol, timeframe)
+                
+                        if backtest_results is False:
+                            self.logger.warning(f"Backtest failed for {symbol} {timeframe}")
                             continue
-                            
-                        df = pd.read_csv(input_file, index_col='timestamp', parse_dates=True)
-                        data_source = "full_data"
-
-                    # Get predictions
-                    probabilities = model.predict_probabilities(df)
+                
+                        # Ensure data_source is in metrics (in case run_test doesn't include it)
+                        if 'data_source' not in metrics:
+                            # Check if test file exists to determine source
+                            symbol_safe = symbol.replace('/', '_')
+                            test_file = Path(f"data/test_sets/{exchange}/{symbol_safe}/{timeframe}_test.csv")
+                            metrics['data_source'] = "test_set" if test_file.exists() else "full_data"
                     
-                    if probabilities is None:
-                        self.logger.error(f"Failed to get predictions for {symbol} {timeframe}")
+                    # Store results and include data source from metrics
+                        data_source = metrics.get('data_source', 'unknown')
+                
+                        symbol_results[timeframe] = {
+                            'results': backtest_results,
+                            'metrics': metrics,
+                            'data_source': data_source
+                        }
+                
+                    except Exception as e:
+                        self.logger.error(f"Error during backtest of {symbol} {timeframe}: {str(e)}")
+                        import traceback
+                        self.logger.error(traceback.format_exc())
                         continue
-                    
-                    # Run backtest
-                    backtest_results, stats = self._run_quantum_backtest(df, probabilities)
-                    
-                    # Add to results
-                    symbol_results[timeframe] = {
-                        'results': backtest_results,
-                        'stats': stats,
-                        'data_source': data_source
-                    }
-                    
-                    # Save individual backtest
-                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                    output_dir = Path(f"data/backtest_results/{symbol_safe}/{timeframe}/{model_name}")
-                    output_dir.mkdir(parents=True, exist_ok=True)
-                    
-                    # Add model name and data source to output for identification
-                    output_file = output_dir / f"{data_source}_{timestamp}.csv"
-                    backtest_results.to_csv(output_file)
-                    
-                    # Save stats
-                    stats_file = output_dir / f"{data_source}_{timestamp}_stats.csv"
-                    stats_df = pd.DataFrame([stats])
-                    stats_df['data_source'] = data_source
-                    stats_df.to_csv(stats_file, index=False)
-                    
-                    self.logger.info(f"Saved backtest results for {symbol} {timeframe} to {output_file}")
-                    
-                    # Plot results
-                    self._plot_backtest_results(backtest_results, symbol, 
-                                                timeframe, data_source)
-                    
-                except Exception as e:
-                    self.logger.error(f"Error during backtest of {symbol} {timeframe}: {str(e)}")
-                    import traceback
-                    self.logger.error(traceback.format_exc())
-                    continue
-            
-            if symbol_results:
-                all_results[symbol] = symbol_results
+                
+                if symbol_results:
+                    exchange_results[symbol] = symbol_results
+                
+            if exchange_results:
+                all_results[exchange] = exchange_results
         
-        # Create a summary report
-        self._create_multi_summary(all_results, symbols, timeframes, model_name)
+        # Create a summary report if we have results
+        if all_results:
+            self.result_logger.create_multi_summary(all_results, timestamp)
+        else:
+            self.logger.warning("No successful backtests to summarize")
         
         return all_results
 
-    def _create_multi_summary(self, all_results, symbols, timeframes, model_name):
-        """Create a summary report for multi-symbol backtest"""
-        try:
-            # Create a DataFrame for summary metrics
-            metrics = ['win_rate', 'profit_factor', 'final_return', 'total_trades', 'data_source']
-            summary = []
-            
-            for symbol in symbols:
-                if symbol not in all_results:
-                    continue
-                    
-                for timeframe in timeframes:
-                    if timeframe not in all_results[symbol]:
-                        continue
-                    
-                    result_info = all_results[symbol][timeframe]
-                    stats = result_info['stats']
-                    data_source = result_info['data_source']
-                    
-                    summary.append({
-                        'symbol': symbol,
-                        'timeframe': timeframe,
-                        'win_rate': stats.get('win_rate', 0),
-                        'profit_factor': stats.get('profit_factor', 0),
-                        'final_return': stats.get('final_return', 0),
-                        'total_trades': stats.get('total_trades', 0),
-                        'data_source': data_source
-                    })
-            
-            if not summary:
-                self.logger.warning("No summary data available")
-                return False
-                
-            summary_df = pd.DataFrame(summary)
-            
-            # Save summary
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            output_dir = Path(f"data/backtest_results/{symbol}/{timeframe}/{model_name}/summary")
-            output_dir.mkdir(parents=True, exist_ok=True)
-            
-            summary_file = output_dir / f"summary_{timestamp}.csv"
-            summary_df.to_csv(summary_file, index=False)
-            
-            # Create summary visualizations
-            self._plot_multi_summary(summary_df, output_dir, model_name, timestamp)
-            
-            self.logger.info(f"Saved summary report to {summary_file}")
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Error creating summary report: {str(e)}")
-            return False
-    
-    def _plot_multi_summary(self, summary_df, output_dir, model_name, timestamp):
-        """Create summary visualization for multi-symbol results"""
-        try:
-            # Plot 1: Win rates by symbol and timeframe
-            plt.figure(figsize=(12, 6))
-            
-            # Pivot data for plotting
-            pivot_win_rate = summary_df.pivot(index='symbol', columns='timeframe', values='win_rate')
-            
-            # Create heatmap
-            cmap = cm.get_cmap('RdYlGn')
-            ax = plt.pcolor(pivot_win_rate, cmap=cmap, vmin=0, vmax=1)
-            
-            # Add colorbar
-            cbar = plt.colorbar(ax)
-            cbar.set_label('Win Rate')
-            
-            # Add labels
-            plt.title(f'Win Rates by Symbol and Timeframe')
-            plt.xticks(np.arange(len(pivot_win_rate.columns)) + 0.5, pivot_win_rate.columns)
-            plt.yticks(np.arange(len(pivot_win_rate.index)) + 0.5, pivot_win_rate.index)
-            
-            # Add text annotations
-            for i in range(len(pivot_win_rate.index)):
-                for j in range(len(pivot_win_rate.columns)):
-                    value = pivot_win_rate.iloc[i, j]
-                    if not np.isnan(value):
-                        plt.text(j + 0.5, i + 0.5, f'{value:.2f}',
-                                    ha='center', va='center',
-                                    color='white' if value < 0.5 else 'black')
-            
-            plt.tight_layout()
-            win_rate_file = output_dir / f"win_rate_heatmap_{timestamp}.png"
-            plt.savefig(win_rate_file)
-            plt.close()
-            
-            # Plot 2: Returns by symbol and timeframe
-            plt.figure(figsize=(10, 6))
-            
-            # Group by symbol and calculate mean return
-            symbol_returns = summary_df.groupby('symbol')['final_return'].mean().sort_values(ascending=False)
-            
-            # Create bar chart
-            plt.bar(symbol_returns.index, symbol_returns.values)
-            plt.axhline(y=0, color='r', linestyle='-', alpha=0.3)
-            
-            plt.title('Average Return by Symbol')
-            plt.xlabel('Symbol')
-            plt.ylabel('Return')
-            plt.xticks(rotation=45)
-            
-            # Add text annotations
-            for i, v in enumerate(symbol_returns):
-                plt.text(i, v + 0.01, f'{v:.2%}',
-                        ha='center', va='bottom',
-                        color='green' if v > 0 else 'red')
-            
-            plt.tight_layout()
-            returns_file = output_dir / f"returns_by_symbol_{timestamp}.png"
-            plt.savefig(returns_file)
-            plt.close()
-            
-            # Plot 3: Test vs. Full data comparison
-            if 'data_source' in summary_df.columns and summary_df['data_source'].nunique() > 1:
-                plt.figure(figsize=(12, 6))
-                
-                # Group by data source and calculate metrics
-                source_metrics = summary_df.groupby('data_source').agg({
-                    'win_rate': 'mean',
-                    'final_return': 'mean',
-                    'profit_factor': lambda x: x.replace([np.inf, -np.inf], np.nan).mean()
-                })
-                
-                # Create grouped bar chart
-                metrics_to_plot = ['win_rate', 'final_return']
-                x = np.arange(len(metrics_to_plot))
-                width = 0.35
-                
-                plt.bar(x - width/2, 
-                        [source_metrics.loc['test_set', 'win_rate'], source_metrics.loc['test_set', 'final_return']], 
-                        width, label='Test Set')
-                plt.bar(x + width/2, 
-                        [source_metrics.loc['full_data', 'win_rate'], source_metrics.loc['full_data', 'final_return']], 
-                        width, label='Full Data')
-                
-                plt.title('Performance Comparison: Test Set vs Full Data')
-                plt.xticks(x, ['Win Rate', 'Return'])
-                plt.ylabel('Value')
-                plt.legend()
-                
-                plt.tight_layout()
-                compare_file = output_dir / f"test_vs_full_comparison_{model_name}_{timestamp}.png"
-                plt.savefig(compare_file)
-                plt.close()
-            
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Error creating multi-summary plots: {str(e)}")
-            # Continue execution even if plotting fails
-            return False
-
-    def run_test_on_test_set(self, exchange='binance', symbol='BTC/USDT', timeframe='1h'):
+    def run_test_on_test_set(self, custom_testset=None):
         """
         Run backtest strictly on test set data to ensure unbiased evaluation
         """
+        symbol = self.params.get('data', 'symbols', 0)
+        timeframe = self.params.get('data', 'timeframes', 0)
+        exchange = self.params.get('data', 'exchanges', 0)
+        testset_path = self.params.get('backtest', 'testsets', 'path')
+        
         self.logger.info(f"Running backtest on test set for {exchange} {symbol} {timeframe}")
         
         try:
-            # 1. Load the test data specifically
+            # Load the test data specifically
             symbol_safe = symbol.replace('/', '_')
-            test_file = Path(f"data/test_sets/{exchange}/{symbol_safe}/{timeframe}_test.csv")
+            test_file = Path(f"{testset_path}/{custom_testset}") or Path(f"{testset_path}/{exchange}/{symbol_safe}/{timeframe}_test.csv")
             
             if not test_file.exists():
                 self.logger.error(f"Test data file not found at {test_file}. Please run training first.")
@@ -743,40 +464,38 @@ class BacktestEngine:
             test_df = pd.read_csv(test_file, index_col='timestamp', parse_dates=True)
             self.logger.info(f"Loaded test set with {len(test_df)} samples")
             
-            # 2. Load model
-            model_factory = ModelFactory(self.config)
+            # Load model
+            model_factory = ModelFactory(self.params)
             model = model_factory.create_model()
             
-            if not model.load_model(symbol, timeframe):
+            if not model.load_model():
                 self.logger.error("Failed to load model for backtesting")
                 return False
             
-            # 3. Run predictions using the trained model
+            # Run predictions using the trained model
             probabilities = model.predict_probabilities(test_df)
             
             if probabilities is None:
                 self.logger.error("Failed to get predictions for backtesting")
                 return False
             
-            # 4. Run backtest with quantum-inspired approach on test data only
-            backtest_results, stats = self._run_quantum_backtest(test_df, probabilities)
+            # Run backtest with quantum-inspired approach on test data only
+            backtest_results, metrics = self._run_quantum_backtest(test_df, probabilities)
             
-            # 5. Save results with clear indication that these are test set results
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            self._save_backtest_results(backtest_results, stats, symbol, timeframe, "test_set")
+            metrics['data_source'] = "test_set"  # Track the data source
             
-            # 6. Plot results 
-            self._plot_backtest_results(backtest_results, symbol, timeframe, "test_set")
+            # Save and plot results
+            self.result_logger.save_results(backtest_results, metrics)
+            self.result_logger.plot_results(backtest_results, metrics)
             
-            # 7. Return results
-            return backtest_results, stats
+            # Return results
+            return backtest_results, metrics
             
         except Exception as e:
             self.logger.error(f"Error during test set backtesting: {str(e)}")
             return False
         
-    def run_position_sizing_test(self, exchange='binance', symbol='BTC/USDT', timeframe='1h', 
-                                    no_trade_threshold=0.96, min_position_change=0.025):
+    def run_position_sizing_test(self, no_trade_threshold=0.96, min_position_change=0.025):
         """
         Run a backtest with quantum position sizing instead of traditional binary signals.
         
@@ -787,21 +506,27 @@ class BacktestEngine:
         4. Evaluates and visualizes performance
         
         Args:
-            exchange (str): Exchange name
-            symbol (str): Trading pair symbol
-            timeframe (str): Data timeframe
             no_trade_threshold (float): Threshold for no_trade probability to ignore signals
             min_position_change (float): Minimum position change to avoid fee churn
                 
         Returns:
             tuple or bool: (backtest_results, metrics, fig) if successful, False otherwise
         """
+        
+        params = self.params
+        exchange = params.get('data', 'exchanges', 0)
+        symbol = params.get('data', 'symbols', 0)
+        timeframe = params.get('data', 'timeframes', 0)
+        strategy = params.get('strategy', 'type', default='quantum')
+        
+        test_sets_path = self.params.get('backtesting', 'test_sets', 'path', default='data/test_sets')
+
         self.logger.info(f"Running position sizing test for {exchange} {symbol} {timeframe}")
         
         try:
             # Check for test data first
             symbol_safe = symbol.replace('/', '_')
-            test_file = Path(f"data/test_sets/{exchange}/{symbol_safe}/{timeframe}_test.csv")
+            test_file = Path(f"{test_sets_path}/{exchange}/{symbol_safe}/{timeframe}_test.csv")
             
             # If test data exists, use it (preferred for proper evaluation)
             if test_file.exists():
@@ -810,7 +535,7 @@ class BacktestEngine:
                 data_source = "test_set"  # Track the data source
             else:
                 # Fall back to processed data with a warning
-                self.logger.warning(f"No test set found. Using processed data instead. "
+                self.logger.warning(f"No test set found at {test_file}. Using processed data instead. "
                         f"This may lead to overoptimistic results due to possible data leakage.")
                 
                 input_file = Path(f"data/processed/{exchange}/{symbol_safe}/{timeframe}.csv")
@@ -823,10 +548,10 @@ class BacktestEngine:
                 data_source = "full_data"  # Track the data source
             
             # Load model through the model factory
-            model_factory = ModelFactory(self.config)
+            model_factory = ModelFactory(self.params)
             model = model_factory.create_model()
             
-            if not model.load_model(symbol, timeframe, version='latest'):
+            if not model.load_model():
                 self.logger.error("Failed to load model for backtesting")
                 return False
             
@@ -835,9 +560,6 @@ class BacktestEngine:
             if hasattr(model, 'run_backtest_with_position_sizing'):
                 return_value = model.run_backtest_with_position_sizing(
                     df, 
-                    exchange=exchange,
-                    symbol=symbol,
-                    timeframe=timeframe,
                     no_trade_threshold=no_trade_threshold,
                     min_position_change=min_position_change
                 )
@@ -987,7 +709,7 @@ class BacktestEngine:
             
             # Save summary
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            model_type = self.config.get('model', 'model_type')
+            model_type = self.params.get('model', 'model_type')
             output_dir = Path(f"data/backtest_results/{symbol}/{timeframe}/{model_type}/summary")
             output_dir.mkdir(parents=True, exist_ok=True)
             

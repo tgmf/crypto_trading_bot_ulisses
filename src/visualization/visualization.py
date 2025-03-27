@@ -18,9 +18,9 @@ from datetime import datetime
 class VisualizationTool:
     """Tools for visualizing trading strategy performance"""
     
-    def __init__(self, config):
+    def __init__(self, params):
         """Initialize with configuration"""
-        self.config = config
+        self.params = params
         self.logger = logging.getLogger(__name__)
     
     def plot_backtest_results(self, results, output_path=None, continuous_position=False):

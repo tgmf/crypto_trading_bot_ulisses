@@ -25,6 +25,7 @@ import json
 import matplotlib.pyplot as plt
 from datetime import datetime
 from ..utils.result_logger import ResultLogger
+from ..utils.param_manager import ParamManager
 class BayesianModel:
     """
     Bayesian model for trading signals using ordered logistic regression
@@ -35,35 +36,36 @@ class BayesianModel:
     creation process.
     """
     
-    def __init__(self, config):
+    def __init__(self, params):
         """
-        Initialize with configuration
-        
+        Initialize with parameter manager
+    
         Args:
-            config (dict): Configuration dictionary containing model parameters,
-                        fee rates, and target thresholds
+            params: ParamManager instance
         """
-        self.config = config
+        
+        self.params = params
         self.logger = logging.getLogger(__name__)
         self.model = None
         self.trace = None
         self.scaler = StandardScaler()
         
-        # Track if we're using JAX acceleration (set by factory)
-        self.using_jax_acceleration = False
-        
-        # Extract model parameters from config
-        self.fee_rate = self.config.get('backtesting', {}).get('fee_rate', 0.0006)
-        self.min_profit = self.config.get('backtesting', {}).get('min_profit_target', 0.008)
+        # Extract model parameters from params
+        self.fee_rate = self.params.get('backtesting', 'fee_rate', default=0.0006)
+        self.min_profit = self.params.get('backtesting', 'min_profit_target', default=0.0001)
         
         # Feature columns to use for prediction
-        self.feature_cols = self.config.get('model', {}).get('feature_cols', [
+        self.feature_cols = self.params.get('model', 'feature_cols', default=[
             'bb_pos', 'RSI_14', 'MACDh_12_26_9', 'trend_strength', 
             'volatility', 'volume_ratio', 'range', 'macd_hist_diff', 
             'rsi_diff', 'bb_squeeze'
         ])
     
-    def create_target(self, df, forward_window=20):
+        # Configure JAX acceleration up front
+        self.using_jax_acceleration = False
+        self._configure_jax_acceleration()
+    
+    def create_target(self, df, forward_window=60):
         """
         Create target variable for training
         
@@ -125,11 +127,13 @@ class BayesianModel:
         Returns:
             tuple: (model, trace) - PyMC model and sampling trace
         """
-        # Note: This method might be replaced by the factory if JAX acceleration is available
-        # But we keep the original implementation for fallback
-        
+        import time
+    
         # Adjust y_train to be 0, 1, 2 instead of -1, 0, 1 for ordered logistic
         y_train_adj = y_train + 1
+    
+        # Log start time
+        start_time = time.time()
         
         # Create PyMC model
         with pm.Model() as model:
@@ -143,23 +147,59 @@ class BayesianModel:
             # Ordered logistic regression likelihood
             p = pm.OrderedLogistic("p", eta=eta, cutpoints=alpha, observed=y_train_adj)
             
+            if self.using_jax_acceleration:
+                # JAX-optimized sampling parameters
+                cores = self.params.get('model', 'jax_cores', default=1) # JAX works better with single-core sampling
+                draws = self.params.get('model', 'jax_draws', 
+                                        default=min(800, self.params.get('model', 'mcmc_draws', default=1000)))
+                tune = self.params.get('model', 'jax_tune', default=800)
+                target_accept = self.params.get('model', 'jax_target_accept', default=0.9)
+                self.logger.info(f"Starting MCMC sampling with JAX acceleration (cores={cores}, draws={draws})")
+            else:
+                # Standard sampling parameters 
+                cores = self.params.get('model', 'mcmc_cores', default=4)
+                draws = self.params.get('model', 'mcmc_draws', default=1000)
+                tune = self.params.get('model', 'mcmc_tune', default=1000)
+                target_accept = self.params.get('model', 'mcmc_target_accept', default=0.9)
+            
+            self.logger.info("Starting MCMC sampling with standard PyMC backend")           
             # Sample from the posterior distribution
-            self.logger.info("Starting MCMC sampling with standard PyMC backend")
+            model_build_time = time.time() - start_time
+            self.logger.info(f"Model building took {model_build_time:.2f} seconds")
+        
+            sampling_start = time.time()
             trace = pm.sample(
-                draws=800,
-                tune=1000,
-                chains=4,
-                cores=1,
-                target_accept=0.9,
+                draws=draws,
+                tune=tune,
+                chains=self.params.get('model', 'mcmc_chains', default=4),
+                cores=cores,
+                target_accept=target_accept,
                 return_inferencedata=True,
                 compute_convergence_checks=False
             )
+        
+            sampling_time = time.time() - sampling_start
+            total_time = time.time() - start_time
+            
+            # Log timing information
+            self.logger.info(f"MCMC sampling completed in {sampling_time:.2f} seconds")
+            self.logger.info(f"Total model build and sampling time: {total_time:.2f} seconds")
+            
+            # Store timing information
+            self.metrics = {
+                'model_build_time': model_build_time,
+                'sampling_time': sampling_time,
+                'total_time': total_time,
+                'using_jax': self.using_jax_acceleration,
+                'draws': draws,
+                'cores': cores
+            }
         
         self.model = model
         self.trace = trace
         return model, trace
     
-    def train(self, exchange='binance', symbol='BTC/USDT', timeframe='1m', test_size=0.3, custom_df=None):
+    def train(self):
         """
         Train the model on processed data with proper train-test split
         
@@ -170,28 +210,33 @@ class BayesianModel:
         4. Saves the test set separately
         5. Trains the model on training data only
         6. Saves the model
-        
-        Args:
-            exchange (str): Exchange name
-            symbol (str): Trading pair symbol
-            timeframe (str): Data timeframe
-            test_size (float): Proportion of data to use for testing (0.0-1.0)
             
         Returns:
             tuple: (train_df, test_df) if successful, False otherwise
         """
+        
+        # Get parameters from ParamManager
+        params = self.params
+        exchange = params.get('data', 'exchanges', 0)
+        symbol = params.get('data', 'symbols', 0)
+        timeframe = params.get('data', 'timeframes', 0)
+        test_size = params.get('training', 'test_size', default=0.3)
+        
         self.logger.info(f"Training model for {exchange} {symbol} {timeframe} with train-test split")
         
         try:
             # Create a safe version of the symbol for file paths
             symbol_safe = symbol.replace('/', '_')
+        
+            # Check if custom dataframe is provided via params
+            custom_df = params.get('custom_df', default=None)
             
             # Use custom dataframe if provided, otherwise load from file
             if custom_df is not None:
                 df = custom_df.copy()
                 self.logger.info(f"Using provided DataFrame with {len(df)} samples")
             else:
-                # Load processed data
+                # Load processed data TODO: get path from param
                 input_file = Path(f"data/processed/{exchange}/{symbol_safe}/{timeframe}.csv")
                 
                 if not input_file.exists():
@@ -208,8 +253,8 @@ class BayesianModel:
             
             # Drop rows with NaN targets (occurs at the end due to forward window)
             df = df.dropna(subset=['target'])
-            
-            # Chronological train-test split - using the last part for testing
+
+            # Create train-test split chronologically
             train_size = int(len(df) * (1 - test_size))
             train_df = df.iloc[:train_size].copy()
             test_df = df.iloc[train_size:].copy()
@@ -218,12 +263,33 @@ class BayesianModel:
             
             # Save test set for later evaluation if test_size > 0
             if test_size > 0 and len(test_df) > 0:
+                #TODO get path from param
                 test_output_dir = Path(f"data/test_sets/{exchange}/{symbol_safe}")
                 test_output_dir.mkdir(parents=True, exist_ok=True)
             
                 test_output_file = test_output_dir / f"{timeframe}_test.csv"
                 test_df.to_csv(test_output_file)
                 self.logger.info(f"Saved test set to {test_output_file}")
+
+            # Get max samples per batch from params, default to 50000
+            max_samples_per_batch = self.params.get('model', 'max_samples_per_batch', default=50000)
+            
+            # Check if we need to batch process due to dataset size
+            if len(train_df) > max_samples_per_batch:
+                self.logger.warning(f"Dataset has {len(train_df)} samples, which exceeds max_samples_per_batch ({max_samples_per_batch})")
+                self.logger.info(f"Using stratified sampling to reduce dataset size")
+                
+                # Perform stratified sampling to maintain class distribution
+                train_df_sampled = pd.DataFrame()
+                for target_value in train_df['target'].unique():
+                    target_df = train_df[train_df['target'] == target_value]
+                    # Calculate how many samples to take from this class
+                    n_samples = min(len(target_df), int(max_samples_per_batch * len(target_df) / len(train_df)))
+                    sampled = target_df.sample(n_samples)
+                    train_df_sampled = pd.concat([train_df_sampled, sampled])
+                
+                self.logger.info(f"Reduced dataset to {len(train_df_sampled)} samples (maintaining class balance)")
+                train_df = train_df_sampled
             
             # Prepare training data
             X_train = train_df[self.feature_cols].values
@@ -237,7 +303,7 @@ class BayesianModel:
             self.build_model(X_train_scaled, y_train)
             
             # Save model
-            self.save_model(symbol, timeframe)
+            self.save_model()
             
             return train_df, test_df
             
@@ -247,8 +313,7 @@ class BayesianModel:
             self.logger.error(traceback.format_exc())
             return False
 
-    def train_with_cv(self, exchange='binance', symbol='BTC/USDT', timeframe='1m', 
-                        test_size=0.2, n_splits=5, gap=0):
+    def train_with_cv(self):
         """
         Train with time-series cross-validation and proper test set separation
         
@@ -258,23 +323,26 @@ class BayesianModel:
         3. Performs time-series cross-validation on the remaining data
         4. Trains the final model on all training+validation data
         5. Saves the model and test set for later evaluation
-        
-        Args:
-            exchange (str): Exchange name
-            symbol (str): Trading pair symbol
-            timeframe (str): Data timeframe
-            test_size (float): Proportion of data to reserve for final testing
-            n_splits (int): Number of CV folds
-            gap (int): Gap between train and validation sets
             
         Returns:
             tuple: (train_val_df, test_df, cv_results) if successful, False otherwise
         """
-        self.logger.info(f"Training model for {exchange} {symbol} {timeframe} with CV")
+            
+        # Get parameters from ParamManager
+        params = self.params
+        exchange = params.get('data', 'exchanges', 0)
+        symbol = params.get('data', 'symbols', 0)
+        timeframe = params.get('data', 'timeframes', 0)
+        test_size = params.get('training', 'test_size', default=0.2)
+        n_splits = params.get('training', 'cv_splits', default=5)
+        gap = params.get('training', 'cv_gap', default=0)
+        
+        self.logger.info(f"Training model for {exchange} {symbol} {timeframe} with cross-validation")
         
         try:
             # Load processed data
             symbol_safe = symbol.replace('/', '_')
+            #TODO: get path from param
             input_file = Path(f"data/processed/{exchange}/{symbol_safe}/{timeframe}.csv")
             
             if not input_file.exists():
@@ -397,10 +465,10 @@ class BayesianModel:
             self.build_model(X_all_scaled, y_all)
             
             # 6. Save model
-            self.save_model(symbol, timeframe)
+            self.save_model()
             
             # Plot CV performance
-            self._plot_cv_results(cv_results, symbol, timeframe)
+            self._plot_cv_results(cv_results)
             
             return train_val_df, test_df, cv_results
             
@@ -410,7 +478,7 @@ class BayesianModel:
             self.logger.error(traceback.format_exc())
             return False
         
-    def train_with_reversed_datasets(self, exchange='binance', symbol='BTC/USDT', timeframe='1m', test_size=0.3):
+    def train_with_reversed_datasets(self):
         """
         Train model with reversed datasets to test consistency and robustness
         
@@ -420,16 +488,17 @@ class BayesianModel:
         3. Reverses the datasets (trains on test, tests on train)
         4. Saves the model with a 'reversed' indicator
         5. Evaluates and compares performance on both approaches
-        
-        Args:
-            exchange (str): Exchange name
-            symbol (str): Trading pair symbol
-            timeframe (str): Data timeframe
-            test_size (float): Proportion of data to use for testing (0.0-1.0)
             
         Returns:
             tuple: (train_df, test_df, comparison_metrics) if successful, False otherwise
         """
+        # Get parameters from ParamManager
+        params = self.params
+        exchange = params.get('data', 'exchanges', 0)
+        symbol = params.get('data', 'symbols', 0)
+        timeframe = params.get('data', 'timeframes', 0)
+        test_size = params.get('training', 'test_size', default=0.3)
+        
         self.logger.info(f"Training model with reversed datasets for {exchange} {symbol} {timeframe}")
         
         try:
@@ -491,7 +560,7 @@ class BayesianModel:
                 self.build_model(X_train_scaled, y_train)
                 
                 # Save original model
-                self.save_model(symbol, timeframe)
+                self.save_model()
                 self.logger.info("Original model trained and saved")
             
             # Now for the reversed training
@@ -519,14 +588,15 @@ class BayesianModel:
             self.build_model(X_train_reversed_scaled, y_train_reversed)
             
             # Save reversed model with indicator
-            self.save_model(symbol, timeframe, suffix="_reversed")
+            params.set("reversed", 'model', 'suffix')
+            self.save_model()
             
             # Evaluate original and reversed models
             self.logger.info("Evaluating both models for comparison")
             
             # Load the original model for comparison
-            original_model = self.__class__(self.config)
-            original_model.load_model(symbol, timeframe)
+            original_model = self.__class__(self.params)
+            original_model.load_model()
             
             # Test original model on original test set
             X_orig_test = test_df[self.feature_cols].values
@@ -571,7 +641,7 @@ class BayesianModel:
                 json.dump(comparison_metrics, f, indent=4)
             
             # Create visualization of model consistency
-            self._plot_model_consistency(comparison_metrics, symbol, timeframe)
+            self._plot_model_consistency(comparison_metrics)
             
             # Log summary
             self.logger.info(f"Model consistency evaluation complete:")
@@ -596,23 +666,33 @@ class BayesianModel:
             self.logger.error(traceback.format_exc())
             return False
 
-    def save_model(self, symbol, timeframe, comment=None, suffix=None):
+    def save_model(self, suffix=None):
         """
-        Save the trained model with improved directory structure
+        Save the trained model to disk
         
         Saves all components needed for prediction using a structured path format:
         models/{symbol_safe}/{timeframe}/{model_type}/{datetime}_{comment}_{suffix}.{ext}
         
         Args:
-            symbol (str): Trading pair symbol
-            timeframe (str): Data timeframe
-            comment (str, optional): User comment to identify purpose
             suffix (str, optional): Additional identifier for special versions
             
         Returns:
-            bool: True if successful, False otherwise
+            tuple: (bool, filename_base) — Success flag and base filename
         """
         try:
+            # Get parameters from ParamManager
+            params = self.params
+            symbol = params.get('data', 'symbols', 0)
+            timeframe = params.get('data', 'timeframes', 0)
+            comment = params.get('model', 'comment', default=None)
+            version = params.get('model', 'version', default='latest')
+    
+            # Check for suffix in params (used only if argument is None)
+            param_suffix = params.get('model', 'suffix', default=None)
+        
+            # Use explicit argument if provided, otherwise use param_suffix
+            suffix = suffix if suffix is not None else param_suffix
+            
             # Create safe path elements
             model_type = self.__class__.__name__.lower()
             symbol_safe = symbol.replace('/', '_')
@@ -634,7 +714,8 @@ class BayesianModel:
                     filename_parts.append(sanitized_comment)
             if suffix:
                 # Sanitize suffix as well just to be safe
-                sanitized_suffix = suffix.replace(' ', '_')
+                sanitized_suffix = suffix.lstrip('_')
+                sanitized_suffix = sanitized_suffix.replace(' ', '_')
                 sanitized_suffix = ''.join(c for c in sanitized_suffix if c.isalnum() or c in '_-')
                 if sanitized_suffix:
                     filename_parts.append(sanitized_suffix)
@@ -674,50 +755,50 @@ class BayesianModel:
             with open(metrics_path, 'w') as f:
                 json.dump(metrics, f, indent=2)
             
-            # Create a symlink to the latest model
-            latest_scaler = model_dir / f"latest_scaler.pkl"
-            latest_trace = model_dir / f"latest_trace.netcdf"
-            latest_feat_cols = model_dir / f"latest_feature_cols.pkl"
-            latest_metrics = model_dir / f"latest_metrics.json"
+            # Create a symlink with a version or to the latest model
+            version_scaler = model_dir / f"{version}_scaler.pkl"
+            version_trace = model_dir / f"{version}_trace.netcdf"
+            version_feat_cols = model_dir / f"{version}_feature_cols.pkl"
+            version_metrics = model_dir / f"{version}_metrics.json"
             
             # Remove existing symlinks if they exist
-            for path in [latest_scaler, latest_trace, latest_feat_cols, latest_metrics]:
+            for path in [version_scaler, version_trace, version_feat_cols, version_metrics]:
                 if path.exists():
                     path.unlink()
             
             # Create new symlinks
-            latest_scaler.symlink_to(scaler_path.name)
-            latest_trace.symlink_to(trace_path.name)
-            latest_feat_cols.symlink_to(feat_cols_path.name)
-            latest_metrics.symlink_to(metrics_path.name)
+            version_scaler.symlink_to(scaler_path.name)
+            version_trace.symlink_to(trace_path.name)
+            version_feat_cols.symlink_to(feat_cols_path.name)
+            version_metrics.symlink_to(metrics_path.name)
             
             # Verify symlinks
-            if not latest_scaler.exists() or latest_scaler.stat().st_size == 0:
-                self.logger.warning(f"Symlink verification failed for {latest_scaler}. Attempting absolute path.")
-                latest_scaler.unlink()
-                latest_scaler.symlink_to(scaler_path.absolute())
+            if not version_scaler.exists() or version_scaler.stat().st_size == 0:
+                self.logger.warning(f"Symlink verification failed for {version_scaler}. Attempting absolute path.")
+                version_scaler.unlink()
+                version_scaler.symlink_to(scaler_path.absolute())
                 
-            if not latest_trace.exists() or latest_trace.stat().st_size == 0:
-                self.logger.warning(f"Symlink verification failed for {latest_trace}. Attempting absolute path.")
-                latest_trace.unlink()
-                latest_trace.symlink_to(trace_path.absolute())
+            if not version_trace.exists() or version_trace.stat().st_size == 0:
+                self.logger.warning(f"Symlink verification failed for {version_trace}. Attempting absolute path.")
+                version_trace.unlink()
+                version_trace.symlink_to(trace_path.absolute())
                 
-            if not latest_feat_cols.exists() or latest_feat_cols.stat().st_size == 0:
-                self.logger.warning(f"Symlink verification failed for {latest_feat_cols}. Attempting absolute path.")
-                latest_feat_cols.unlink()
-                latest_feat_cols.symlink_to(feat_cols_path.absolute())
+            if not version_feat_cols.exists() or version_feat_cols.stat().st_size == 0:
+                self.logger.warning(f"Symlink verification failed for {version_feat_cols}. Attempting absolute path.")
+                version_feat_cols.unlink()
+                version_feat_cols.symlink_to(feat_cols_path.absolute())
                 
-            if not latest_metrics.exists() or latest_metrics.stat().st_size == 0:
-                self.logger.warning(f"Symlink verification failed for {latest_metrics}. Attempting absolute path.")
-                latest_metrics.unlink()
-                latest_metrics.symlink_to(metrics_path.absolute())
+            if not version_metrics.exists() or version_metrics.stat().st_size == 0:
+                self.logger.warning(f"Symlink verification failed for {version_metrics}. Attempting absolute path.")
+                version_metrics.unlink()
+                version_metrics.symlink_to(metrics_path.absolute())
                 
             # Final verification
             symlink_success = all([
-                latest_scaler.exists(), 
-                latest_trace.exists(), 
-                latest_feat_cols.exists(), 
-                latest_metrics.exists()
+                version_scaler.exists(), 
+                version_trace.exists(), 
+                version_feat_cols.exists(), 
+                version_metrics.exists()
             ])
             
             if not symlink_success:
@@ -732,8 +813,7 @@ class BayesianModel:
             self.logger.error(traceback.format_exc())
             return False, None
 
-    def load_model(self, symbol, timeframe, timestamp=None, 
-                comment=None, suffix=None, version='latest'):
+    def load_model(self):
         """
         Load a trained model with flexible path resolution
         
@@ -742,20 +822,20 @@ class BayesianModel:
         2. The legacy flat format for backward compatibility
         3. Latest version using 'latest' symlinks
         4. Specific version by providing timestamp/comment/suffix
-        
-        Args:
-            symbol (str): Trading pair symbol
-            timeframe (str): Data timeframe
-            timestamp (str, optional): Timestamp to filter by
-            comment (str, optional): Comment to filter by
-            suffix (str, optional): Suffix to filter by
-            version (str, optional): 'latest' or 'specific'. If 'latest', other filters 
-                                    are ignored and latest version is loaded
             
         Returns:
             bool: True if successful, False otherwise
         """
         try:
+            # Get parameters from ParamManager
+            params = self.params
+            symbol = params.get('data', 'symbols', 0)
+            timeframe = params.get('data', 'timeframes', 0)
+            timestamp = params.get('model', 'timestamp', default=None)
+            comment = params.get('model', 'comment', default=None)
+            suffix = params.get('model', 'suffix', default=None)
+            version = params.get('model', 'version', default='latest')
+            
             # Create safe symbol name for paths
             symbol_safe = symbol.replace('/', '_')
             model_type = self.__class__.__name__.lower()
@@ -771,10 +851,10 @@ class BayesianModel:
             model_files = {}
             
             # If version is 'latest', try to load the latest symlinks
-            if version == 'latest':
-                scaler_path = model_dir / "latest_scaler.pkl"
-                trace_path = model_dir / "latest_trace.netcdf" 
-                feat_cols_path = model_dir / "latest_feature_cols.pkl"
+            if version:
+                scaler_path = model_dir / f"{version}_scaler.pkl"
+                trace_path = model_dir / f"{version}_trace.netcdf" 
+                feat_cols_path = model_dir / f"{version}_feature_cols.pkl"
                 
                 if scaler_path.exists() and trace_path.exists():
                     model_files = {
@@ -783,7 +863,7 @@ class BayesianModel:
                         'feat_cols': feat_cols_path
                     }
                     found_model = True
-                    self.logger.info(f"Loading latest model from {model_dir}")
+                    self.logger.info(f"Loading {version} model from {model_dir}")
             
             # Otherwise look for a specific version using filters
             elif version == 'specific' and any([timestamp, comment, suffix]):
@@ -931,7 +1011,7 @@ class BayesianModel:
         # Return most likely class
         return np.argmax(probs, axis=1)
     
-    def _plot_cv_results(self, cv_results, symbol, timeframe):
+    def _plot_cv_results(self, cv_results):
         """
         Plot cross-validation results
         
@@ -941,13 +1021,16 @@ class BayesianModel:
         
         Args:
             cv_results (dict): Dictionary with cross-validation results
-            symbol (str): Trading pair symbol
-            timeframe (str): Data timeframe
             
         Returns:
             bool: True if successful, False otherwise
         """
         try:
+            # Get parameters from ParamManager
+            params = self.params
+            symbol = params.get('data', 'symbols', 0)
+            timeframe = params.get('data', 'timeframes', 0)
+            
             # Create directory for plots if it doesn't exist
             symbol_safe = symbol.replace('/', '_')
             model_type = self.__class__.__name__.lower()
@@ -995,7 +1078,7 @@ class BayesianModel:
             self.logger.error(f"Error plotting CV results: {str(e)}")
             return False
     
-    def _plot_model_consistency(self, metrics, symbol, timeframe):
+    def _plot_model_consistency(self, metrics):
         """
         Create visualizations of model consistency metrics
         
@@ -1005,13 +1088,16 @@ class BayesianModel:
         
         Args:
             metrics (dict): Dictionary with comparison metrics
-            symbol (str): Trading pair symbol
-            timeframe (str): Data timeframe
             
         Returns:
             bool: True if successful, False otherwise
         """
         try:
+            # Get parameters from ParamManager
+            params = self.params
+            symbol = params.get('data', 'symbols', 0)
+            timeframe = params.get('data', 'timeframes', 0)
+            
             # Create output directory
             symbol_safe = symbol.replace('/', '_')
             model_type = self.__class__.__name__.lower()
@@ -1090,23 +1176,25 @@ class BayesianModel:
             self.logger.error(f"Error plotting model consistency: {str(e)}")
             return False
     
-    def train_multi(self, symbols, timeframes, exchange='binance', max_samples=500000):
+    def train_multi(self):
         """
         Train the model on multiple symbols and timeframes
         
         This method trains a universal model that can be used across multiple
         trading pairs and timeframes. This is useful for finding patterns that
         generalize across different assets and time horizons.
-        
-        Args:
-            symbols (list): List of trading pair symbols
-            timeframes (list): List of timeframe strings
-            exchange (str): Exchange name
-            max_samples (int): Maximum number of samples to use for training
                 
         Returns:
             bool: True if successful, False otherwise
         """
+        
+        # Get parameters from ParamManager
+        params = self.params
+        symbols = params.get('data', 'symbols')
+        timeframes = params.get('data', 'timeframes')
+        exchange = params.get('data', 'exchanges', 0)
+        max_samples = params.get('model', 'max_samples_per_batch', default=500000)
+        
         self.logger.info(f"Training model on multiple symbols and timeframes")
         
         # Lists to store all training data
@@ -1236,7 +1324,7 @@ class BayesianModel:
             self.logger.error(traceback.format_exc())
             return False
 
-    def _generate_multi_model_name(self, symbols, timeframes):
+    def _generate_multi_model_name(self):
         """
         Generate a consistent name for multi-symbol models
         
@@ -1250,6 +1338,11 @@ class BayesianModel:
         Returns:
             str: Generated model name
         """
+        # Get parameters from ParamManager
+        params = self.params
+        symbols = params.get('data', 'symbols')
+        timeframes = params.get('data', 'timeframes')
+        
         symbols_str = "_".join([s.replace('/', '_') for s in symbols])
         timeframes_str = "_".join(timeframes)
         
@@ -1273,6 +1366,21 @@ class BayesianModel:
             bool: True if successful, False otherwise
         """
         try:
+            # Get parameters from ParamManager
+            params = self.params
+            
+            # Check if a suffix is specified in ParamManager
+            suffix = params.get('model', 'suffix', default=None)
+        
+            # Append suffix to model_name if provided
+            if suffix:
+                # Sanitize suffix
+                sanitized_suffix = suffix.lstrip('_')
+                sanitized_suffix = sanitized_suffix.replace(' ', '_')
+                sanitized_suffix = ''.join(c for c in sanitized_suffix if c.isalnum() or c in '_-')
+                if sanitized_suffix:
+                    model_name = f"{model_name}_{sanitized_suffix}"
+            
             # Create directory
             model_dir = Path("models")
             model_dir.mkdir(exist_ok=True)
@@ -1298,8 +1406,23 @@ class BayesianModel:
             self.logger.error(f"Error saving multi-symbol model: {str(e)}")
             return False
         
-    def continue_training(self, new_data_df, symbol='BTC/USDT', timeframe='1h'):
-        """Continue training an existing model with new data"""
+    def continue_training(self):
+        """
+        Continue training an existing model with new data
+        
+        This method can either:
+        1. Load new data from the standard location (automatically)
+        2. Use a custom dataframe provided via params.get('new_data_df')
+        
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        # Get parameters from ParamManager
+        params = self.params
+        symbol = params.get('data', 'symbols', 0)
+        timeframe = params.get('data', 'timeframes', 0)
+        exchange = params.get('data', 'exchanges', 0)
+        
         self.logger.info(f"Continuing training for {symbol} {timeframe}")
         
         # Check if a model exists
@@ -1308,9 +1431,48 @@ class BayesianModel:
             return False
         
         try:
-            # Process new data
+            # Check if custom data is provided via params
+            new_data_df = params.get('new_data_df', default=None)
+            
+            # If no custom data provided, load from standard location
+            if new_data_df is None:
+                # Get new data to train on
+                symbol_safe = symbol.replace('/', '_')
+                data_file = Path(f"data/processed/{exchange}/{symbol_safe}/{timeframe}.csv")
+                
+                if not data_file.exists():
+                    self.logger.error(f"No processed data found at {data_file}")
+                    return False
+
+                # Load the data
+                new_data_df = pd.read_csv(data_file, index_col='timestamp', parse_dates=True)
+                self.logger.info(f"Loaded {len(new_data_df)} rows from {data_file}")
+                
+                # Check for test set to avoid training on it
+                test_file = Path(f"data/test_sets/{exchange}/{symbol_safe}/{timeframe}_test.csv")
+                if test_file.exists():
+                    test_df = pd.read_csv(test_file, index_col='timestamp', parse_dates=True)
+                    self.logger.info(f"Found test set with {len(test_df)} rows")
+                    
+                    # Remove test data from training data
+                    new_data_df = new_data_df[~new_data_df.index.isin(test_df.index)]
+                    self.logger.info(f"Removed test data, {len(new_data_df)} rows remaining for training")
+
+                # Apply data sampling if dataset is too large
+                max_samples = params.get('model', 'max_samples_per_batch', default=100000)
+                if len(new_data_df) > max_samples:
+                    self.logger.info(f"Dataset too large, sampling {max_samples} rows")
+                    new_data_df = new_data_df.sample(max_samples, random_state=42)
+            else:
+                self.logger.info(f"Using provided custom dataframe with {len(new_data_df)} samples")
+            
+            # Process data
+            if 'target' not in new_data_df.columns:
+                self.logger.info("Creating target variables for new data")
+                new_data_df['target'] = self.create_target(new_data_df)
+            
+            # Extract features and target
             X_new = new_data_df[self.feature_cols].values
-            new_data_df['target'] = self.create_target(new_data_df)
             y_new = new_data_df['target'].values
             
             # Scale new data using existing scaler
@@ -1347,8 +1509,9 @@ class BayesianModel:
             self.trace = new_trace
             
             # Save updated model
-            self.save_model(symbol, timeframe)
+            self.save_model()
             
+            self.logger.info(f"Model continued training successfully with {len(new_data_df)} samples")
             return True
             
         except Exception as e:
@@ -1357,8 +1520,20 @@ class BayesianModel:
             self.logger.error(traceback.format_exc())
             return False
         
-    def train_with_reservoir(self, new_data_df, max_samples=10000, exchange='binance', symbol='BTC/USDT', timeframe='1h'):
+    def train_with_reservoir(self):
         """Train model using reservoir sampling to maintain a representative dataset"""
+        # Get parameters from ParamManager
+        params = self.params
+        exchange = params.get('data', 'exchanges', 0)
+        symbol = params.get('data', 'symbols', 0)
+        timeframe = params.get('data', 'timeframes', 0)
+        max_samples = params.get('model', 'reservoir_size', default=10000)
+    
+        # Get new data from params
+        new_data_df = params.get('new_data_df', default=None)
+        if new_data_df is None:
+            self.logger.error("No new data provided via params.set('new_data_df', df)")
+            return False
         
         # Check if we already have a reservoir
         reservoir_path = Path(f"data/reservoir/{exchange}/{symbol.replace('/', '_')}/{timeframe}.csv")
@@ -1392,10 +1567,20 @@ class BayesianModel:
         self.logger.info(f"Updated reservoir with {len(reservoir_df)} samples")
         
         # Train on the reservoir
-        return self.train(exchange, symbol, timeframe, reservoir_df=reservoir_df)
+        params.set(reservoir_df, 'custom_df')
+        return self.train()
     
-    def train_with_time_weighting(self, all_data_df, exchange='binance', symbol='BTC/USDT', timeframe='1h', recency_weight=2.0):
+    def train_with_time_weighting(self):
         """Train with time-weighted sampling (newer data gets higher probability)"""
+        # Get parameters from ParamManager
+        params = self.params
+        recency_weight = params.get('training', 'recency_weight', default=2.0)
+    
+        # Get all data from params
+        all_data_df = params.get('all_data_df', default=None)
+        if all_data_df is None:
+            self.logger.error("No data provided via params.set('all_data_df', df)")
+            return False
         
         # Sort by time
         all_data_df = all_data_df.sort_index()
@@ -1417,4 +1602,451 @@ class BayesianModel:
         sampled_df = all_data_df.iloc[sampled_indices]
         
         # Train on weighted sample
-        return self.train(exchange, symbol, timeframe, custom_df=sampled_df)
+        params.set(sampled_df, 'custom_df')
+        return self.train()
+    
+    def _configure_jax_acceleration(self):
+        """Configure JAX acceleration settings if available"""
+        # Check for acceleration capabilities
+        jax_available = self.params.get('model', 'jax_available', default=False)
+        use_jax = self.params.get('model', 'use_jax', default=False)
+        
+        # Only attempt JAX acceleration if both available and enabled
+        if jax_available and use_jax:
+            try:
+                import pytensor
+                
+                # Configure PyTensor for JAX
+                pytensor.config.compute_test_value = "off"
+                
+                # Get JAX precision parameter
+                jax_precision = self.params.get('model', 'jax_precision', default='float32')
+                pytensor.config.floatX = jax_precision
+            
+                # Advanced JAX configurations
+                jax_opt_level = self.params.get('model', 'jax_opt_level', default=None)
+                if jax_opt_level is not None:
+                    pytensor.config.optimizer = jax_opt_level
+                
+                # Memory optimization for JAX if requested
+                if self.params.get('model', 'jax_memory_efficient', default=False):
+                    pytensor.config.gcc__cxxflags = "-fno-inline"
+                
+                # JAX XLA compilation flags
+                if self.params.get('model', 'jax_xla_debug', default=False):
+                    import os
+                    os.environ['XLA_FLAGS'] = '--xla_dump_to=/tmp/xla_dumps'
+                
+                self.logger.info(f"JAX acceleration configured with precision {jax_precision}")
+                self.using_jax_acceleration = True
+                
+            except Exception as e:
+                self.logger.warning(f"Failed to configure JAX: {e}, continuing without acceleration")
+                self.using_jax_acceleration = False
+                
+    def run_backtest_with_position_sizing(self, df, no_trade_threshold=0.96, 
+                                            min_position_change=0.025, compound_returns=True, exaggerate=True):
+        """
+        Run backtest with continuous position sizing based on probability distributions
+    
+        This implementation:
+        1. Treats long and short positions separately (can have both simultaneously)
+        2. Position sizes directly correspond to probability values 
+        3. Only updates positions when probability changes exceed threshold
+        4. Optionally compounds returns to grow/shrink position sizes
+        5. Optionally exaggerates position sizes to increase contrast between signals
+        
+        Args:
+            df (DataFrame): Price data with OHLCV columns
+            no_trade_threshold (float): Threshold for no_trade probability to ignore signals
+            min_position_change (float): Minimum position change to avoid fee churn
+            compound_returns (bool): Whether to compound returns for position sizing
+            exaggerate (bool): Whether to exaggerate position sizes based on probability differences
+
+        Returns:
+            tuple: (results_df, metrics, fig) with backtest results, performance metrics, and visualization
+        """
+        symbol = self.params.get('data', 'symbols', 0)
+        timeframe = self.params.get('data', 'timeframes', 0)
+        
+        self.logger.info(f"Running position sizing backtest for {symbol} {timeframe}")
+        
+        try:
+            # 1. Get probabilistic predictions
+            probabilities = self.predict_probabilities(df)
+            
+            if probabilities is None:
+                self.logger.error("Failed to get probability predictions")
+                return False
+                
+            # 2. Create a copy of the dataframe for backtesting
+            results = df.copy()
+            
+            # 3. Add probability columns
+            results['short_prob'] = probabilities[:, 0]
+            results['no_trade_prob'] = probabilities[:, 1]
+            results['long_prob'] = probabilities[:, 2]
+        
+            # Store original probabilities for reference
+            results['original_long_prob'] = results['long_prob'].copy()
+            results['original_short_prob'] = results['short_prob'].copy()
+            
+            # 4. Apply exaggeration if enabled
+            if exaggerate:
+            
+                # Calculate the redistributable probability (what's below no_trade_threshold)
+                results['redistributable_prob'] = np.maximum(0, no_trade_threshold - results['no_trade_prob'])
+                
+                # Apply exaggeration to each row
+                for i in range(len(results)):
+                    if results.iloc[i]['no_trade_prob'] < no_trade_threshold:
+                        # We have redistributable probability
+                        redist_prob = results.iloc[i]['redistributable_prob']
+                        long_prob = results.iloc[i]['long_prob']
+                        short_prob = results.iloc[i]['short_prob']
+                        
+                        # Calculate the proportion of long vs short
+                        total_directional = long_prob + short_prob
+                        if total_directional > 0:
+                            # Create a power function to exaggerate the difference
+                            # Higher power = more exaggeration
+                            exaggeration_power = 2.0  # Adjust this parameter for more/less exaggeration
+                            
+                            # Calculate normalized proportions
+                            long_ratio = long_prob / total_directional
+                            short_ratio = short_prob / total_directional
+                            
+                            # Apply power function to exaggerate differences
+                            long_exaggerated = long_ratio ** exaggeration_power
+                            short_exaggerated = short_ratio ** exaggeration_power
+                            
+                            # Renormalize to ensure they sum to 1
+                            total_exaggerated = long_exaggerated + short_exaggerated
+                            if total_exaggerated > 0:  # Avoid division by zero
+                                long_exaggerated = long_exaggerated / total_exaggerated
+                                short_exaggerated = short_exaggerated / total_exaggerated
+                                
+                                # Distribute redistributable probability according to exaggerated ratios
+                                long_boost = redist_prob * long_exaggerated
+                                short_boost = redist_prob * short_exaggerated
+                                
+                                # Update probabilities
+                                results.iloc[i, results.columns.get_loc('long_prob')] = long_prob + long_boost
+                                results.iloc[i, results.columns.get_loc('short_prob')] = short_prob + short_boost
+            
+            # 5. Calculate raw position sizes directly from probabilities
+            # Ignore probabilities if no_trade is high
+            results['raw_long_position'] = np.where(
+                results['no_trade_prob'] >= no_trade_threshold,
+                0,  # No position when no_trade probability is high
+                results['long_prob']  # Otherwise use long probability directly
+            )
+            
+            results['raw_short_position'] = np.where(
+                results['no_trade_prob'] >= no_trade_threshold,
+                0,  # No position when no_trade probability is high
+                results['short_prob']  # Otherwise use short probability directly
+            )
+        
+            # 6. Initialize compounding factor (starting with 1.0 = 100% of base size)
+            if compound_returns:
+                results['compound_factor'] = 1.0
+            
+            # 7. Apply minimum change threshold to avoid fee churn
+            # Handle each position type separately
+            results['long_position'] = 0.0
+            results['short_position'] = 0.0
+            
+            # 8. Calculate price return
+            results['price_return'] = results['close'].pct_change()
+            
+            # 9. Loop through data and calculate positions with optional compounding
+            compound_factor = 1.0  # Start with base sizing
+            realized_pnl = 0.0     # Track realized P&L for compounding
+            prev_long = 0.0
+            prev_short = 0.0
+            
+            for i in range(len(results)):
+                # Get raw position signals based on probabilities
+                raw_long = results.iloc[i]['raw_long_position']
+                raw_short = results.iloc[i]['raw_short_position']
+                
+                if compound_returns:
+                    # Apply current compound factor to raw positions
+                    raw_long_sized = raw_long * compound_factor
+                    raw_short_sized = raw_short * compound_factor
+                else:
+                    raw_long_sized = raw_long
+                    raw_short_sized = raw_short
+    
+                # Calculate potential position changes
+                long_change = abs(raw_long_sized - prev_long)
+                short_change = abs(raw_short_sized - prev_short)
+                
+                # Apply position changes only if they exceed minimum threshold
+                if long_change >= min_position_change:
+                    # Position is changing - ONLY NOW do we realize P&L and compound
+                    if i > 0 and prev_long > 0:
+                        # Calculate P&L from previous position
+                        price_return = results.iloc[i-1]['price_return'] if i > 1 else 0
+                        if not np.isnan(price_return):
+                            # Calculate P&L on the CLOSED portion of the position
+                            closed_size = abs(raw_long_sized - prev_long)
+                            direction = 1 if raw_long_sized < prev_long else -1  # Reducing or increasing
+                            pnl_from_price = prev_long * price_return
+                        
+                            # We realize P&L proportional to position adjustment
+                            realized_pnl_long = pnl_from_price * (closed_size / prev_long) * direction
+                            
+                            # Apply fee for the position change
+                            fee_impact = closed_size * 0.0006  # 0.06% fee
+                            
+                            # Update compound factor ONLY on position changes
+                            realized_pnl += realized_pnl_long - fee_impact
+                    
+                    # Update long position
+                    new_long = raw_long_sized
+                else:
+                    # No change to long position
+                    new_long = prev_long
+                        
+                        
+                # Same logic for short positions
+                if short_change >= min_position_change:
+                    # Position is changing - ONLY NOW do we realize P&L and compound
+                    if i > 0 and prev_short > 0:
+                        # Calculate P&L from previous position (shorts gain when price falls)
+                        price_return = results.iloc[i-1]['price_return'] if i > 1 else 0
+                        if not np.isnan(price_return):
+                            # Calculate P&L on the CLOSED portion of the position
+                            closed_size = abs(raw_short_sized - prev_short)
+                            direction = 1 if raw_short_sized < prev_short else -1  # Reducing or increasing
+                            pnl_from_price = -prev_short * price_return  # Negative for shorts
+                            
+                            # We realize P&L proportional to position adjustment
+                            realized_pnl_short = pnl_from_price * (closed_size / prev_short) * direction
+                            
+                            # Apply fee for the position change
+                            fee_impact = closed_size * 0.0006  # 0.06% fee
+                            
+                            # Update compound factor ONLY on position changes
+                            realized_pnl += realized_pnl_short - fee_impact
+                            
+                    # Update short position
+                    new_short = raw_short_sized
+                else:
+                    # No change to short position
+                    new_short = prev_short
+                
+                # Update compound factor based on REALIZED pnl only
+                if compound_returns and i > 0 and (long_change >= min_position_change or short_change >= min_position_change):
+                    # Only update compound factor when positions change
+                    compound_factor *= (1 + realized_pnl)
+                    realized_pnl = 0.0  # Reset realized P&L after compounding
+                
+                # Store positions and compound factor
+                results.iloc[i, results.columns.get_loc('long_position')] = new_long
+                results.iloc[i, results.columns.get_loc('short_position')] = new_short
+                results.iloc[i, results.columns.get_loc('compound_factor')] = compound_factor
+                
+                # Update previous positions for next iteration
+                prev_long = new_long
+                prev_short = new_short
+            
+            # 10. Calculate net position (for compatibility)
+            results['position'] = results['long_position'] - results['short_position']
+            
+            # 11. Calculate separate returns for long and short positions
+            results['long_return'] = results['long_position'].shift(1) * results['price_return']
+            results['short_return'] = -1 * results['short_position'].shift(1) * results['price_return']  # Negative for shorts
+            results['strategy_return'] = results['long_return'] + results['short_return']
+            
+            # 12. Add fee impact - fees are proportional to position change
+            fee_rate = 0.0006  # Typical fee of 0.06%
+            results['long_change'] = results['long_position'].diff().abs()
+            results['short_change'] = results['short_position'].diff().abs()
+            results['fee_impact'] = (results['long_change'] + results['short_change']) * fee_rate
+            
+            # 13. Net returns after fees
+            results['net_return'] = results['strategy_return'] - results['fee_impact']
+        
+            # 14. Calculate cumulative returns
+            results['price_cumulative'] = (1 + results['price_return'].fillna(0)).cumprod() - 1
+            results['strategy_cumulative'] = (1 + results['net_return'].fillna(0)).cumprod() - 1
+            
+            # 15. Calculate separate cumulative returns for long and short
+            results['long_cumulative'] = (1 + results['long_return'].fillna(0)).cumprod() - 1
+            results['short_cumulative'] = (1 + results['short_return'].fillna(0)).cumprod() - 1
+            
+            # 16. Calculate performance metrics
+            metrics = self._calculate_position_sizing_metrics(results, min_position_change)
+            
+            # Add compounding information to metrics
+            if compound_returns:
+                metrics['compound_returns'] = True
+                metrics['final_compound_factor'] = results['compound_factor'].iloc[-1]
+                metrics['max_compound_factor'] = results['compound_factor'].max()
+                metrics['min_compound_factor'] = results['compound_factor'].min()
+                metrics['max_position_size'] = max(
+                    results['long_position'].max(),
+                    results['short_position'].max()
+                )
+            else:
+                metrics['compound_returns'] = False
+            
+            # Add exaggeration information to metrics
+            metrics['exaggerate_positions'] = exaggerate
+            if exaggerate:
+                metrics['avg_long_boost'] = (results['long_prob'] - results['original_long_prob']).mean()
+                metrics['avg_short_boost'] = (results['short_prob'] - results['original_short_prob']).mean()
+                metrics['max_long_boost'] = (results['long_prob'] - results['original_long_prob']).max()
+                metrics['max_short_boost'] = (results['short_prob'] - results['original_short_prob']).max()
+            
+            # 17. Create visualization using result logger
+            from ..utils.result_logger import ResultLogger
+            result_logger = ResultLogger(self.params)
+
+            # Strategy type suffix based on exaggeration
+            strategy_type = 'position_sizing_exaggerated' if exaggerate else 'position_sizing'
+
+            # Save results to standardized formats
+            result_logger.save_results(results, metrics, strategy_type=strategy_type)
+
+            # Create visualizations
+            viz_files = result_logger.plot_results(results, metrics, strategy_type=strategy_type)
+            
+            # Add visualization paths to metrics
+            metrics['visualization_files'] = viz_files
+            
+            # Return results
+            fig = None  # The ResultLogger already saved the figures
+            return results, metrics, fig
+            
+        except Exception as e:
+            self.logger.error(f"Error in position sizing backtest: {str(e)}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            return False, False, False
+
+    def _calculate_position_sizing_metrics(self, results, min_position_change):
+        """
+        Calculate performance metrics for position sizing backtest
+        
+        Args:
+            results (DataFrame): Backtest results dataframe
+            
+        Returns:
+            dict: Dictionary of performance metrics
+        """
+        # Filter out rows with NaN returns
+        valid_results = results.dropna(subset=['net_return'])
+        
+        if len(valid_results) < 2:
+            return {'error': 'Not enough valid data points'}
+        
+        # Get final returns
+        final_price_return = valid_results['price_cumulative'].iloc[-1]
+        final_strategy_return = valid_results['strategy_cumulative'].iloc[-1]
+        final_long_return = valid_results['long_cumulative'].iloc[-1] if 'long_cumulative' in valid_results.columns else 0
+        final_short_return = valid_results['short_cumulative'].iloc[-1] if 'short_cumulative' in valid_results.columns else 0
+        
+        # Calculate Sharpe ratio (annualized)
+        # Assuming daily data, adjust for other timeframes
+        timeframe_multiplier = {
+            '1m': 365 * 24 * 60,
+            '5m': 365 * 24 * 12,
+            '15m': 365 * 24 * 4,
+            '30m': 365 * 24 * 2,
+            '1h': 365 * 24,
+            '4h': 365 * 6,
+            '1d': 365,
+            '1w': 52
+        }
+        
+        # Default to daily if timeframe not recognized
+        multiplier = timeframe_multiplier.get('1d', 365)
+        
+        returns_mean = valid_results['net_return'].mean()
+        returns_std = valid_results['net_return'].std()
+        sharpe = (returns_mean / returns_std) * np.sqrt(multiplier) if returns_std > 0 else 0
+        
+        # Calculate max drawdown
+        cum_returns = valid_results['strategy_cumulative']
+        running_max = cum_returns.cummax()
+        drawdown = (cum_returns - running_max) / (1 + running_max)
+        max_drawdown = drawdown.min()
+        
+        # Calculate win rate
+        daily_returns = valid_results.resample('D')['net_return'].sum().dropna()
+        win_rate = (daily_returns > 0).mean()
+        
+        # Calculate profit factor
+        winning_days = daily_returns[daily_returns > 0].sum()
+        losing_days = abs(daily_returns[daily_returns < 0].sum())
+        profit_factor = winning_days / losing_days if losing_days != 0 else float('inf')
+        
+        # Calculate alpha (excess return over buy & hold)
+        alpha = final_strategy_return - final_price_return
+        
+        # Calculate fee impact
+        total_fees = valid_results['fee_impact'].sum()
+        total_return_before_fees = (1 + valid_results['strategy_return']).cumprod().iloc[-1] - 1
+        total_return_after_fees = (1 + valid_results['net_return']).cumprod().iloc[-1] - 1
+        fee_drag = total_return_before_fees - total_return_after_fees
+        
+        # Count number of position changes
+        long_changes = (valid_results['long_change'] > min_position_change).sum() if 'long_change' in valid_results.columns else 0
+        short_changes = (valid_results['short_change'] > min_position_change).sum() if 'short_change' in valid_results.columns else 0
+        
+        # Position exposure metrics
+        long_exposure = valid_results['long_position'].mean()
+        short_exposure = valid_results['short_position'].mean()
+        net_exposure = long_exposure - short_exposure
+        
+        # Calculate long-only metrics
+        if 'long_return' in valid_results.columns:
+            long_returns = valid_results['long_return']
+            long_win_rate = (long_returns > 0).mean() if (valid_results['long_position'] > 0).any() else 0
+            long_sharpe = (long_returns.mean() / long_returns.std()) * np.sqrt(multiplier) if long_returns.std() > 0 else 0
+        else:
+            long_win_rate = 0
+            long_sharpe = 0
+        
+        # Calculate short-only metrics
+        if 'short_return' in valid_results.columns:
+            short_returns = valid_results['short_return']
+            short_win_rate = (short_returns > 0).mean() if (valid_results['short_position'] > 0).any() else 0
+            short_sharpe = (short_returns.mean() / short_returns.std()) * np.sqrt(multiplier) if short_returns.std() > 0 else 0
+        else:
+            short_win_rate = 0
+            short_sharpe = 0
+        
+        # Create metrics dictionary
+        metrics = {
+            'total_return': final_strategy_return,
+            'buy_hold_return': final_price_return,
+            'long_only_return': final_long_return,
+            'short_only_return': final_short_return,
+            'alpha': alpha,
+            'sharpe_ratio': sharpe,
+            'long_sharpe': long_sharpe,
+            'short_sharpe': short_sharpe,
+            'max_drawdown': max_drawdown,
+            'win_rate': win_rate,
+            'long_win_rate': long_win_rate,
+            'short_win_rate': short_win_rate,
+            'profit_factor': profit_factor,
+            'long_changes': long_changes,
+            'short_changes': short_changes,
+            'total_position_changes': long_changes + short_changes,
+            'fee_drag': fee_drag,
+            'total_fees': total_fees,
+            'total_trading_days': len(daily_returns),
+            'long_exposure': long_exposure,
+            'short_exposure': short_exposure,
+            'net_exposure': net_exposure,
+            'avg_long_size': valid_results[valid_results['long_position'] > 0]['long_position'].mean() if (valid_results['long_position'] > 0).any() else 0,
+            'avg_short_size': valid_results[valid_results['short_position'] > 0]['short_position'].mean() if (valid_results['short_position'] > 0).any() else 0
+        }
+        
+        return metrics

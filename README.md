@@ -5,7 +5,7 @@ A cryptocurrency trading system using Bayesian and quantum-inspired probabilisti
 [![Python 3.10](https://img.shields.io/badge/python-3.10-blue.svg)](https://www.python.org/downloads/release/python-3100/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![PyMC](https://img.shields.io/badge/PyMC-5.x-orange.svg)](https://www.pymc.io/)
-[![Contributions welcome](https://img.shields.io/badge/contributions-welcome-brightgreen.svg)](https://github.com/yourusername/quantumtrader/issues)
+[![Contributions welcome](https://img.shields.io/badge/contributions-welcome-brightgreen.svg)](https://github.com/tgmf/crypto_trading_bot_ulisses/issues)
 
 ## 🌟 Features
 
@@ -18,7 +18,7 @@ A cryptocurrency trading system using Bayesian and quantum-inspired probabilisti
 
 ## 📊 Trading Model Architecture
 
-The system uses a unique three-state quantum-inspired approach:
+The system uses a three-state quantum-inspired approach:
 
 - **Short (-1)**: Betting on price decrease
 - **Neutral (0)**: No clear edge detected
@@ -42,7 +42,7 @@ Unlike traditional binary classification models, our approach:
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/quantumtrader.git
+git clone https://github.com/tgmf/crypto_trading_bot_ulisses.git
 cd quantumtrader
 
 # Create conda environment
@@ -81,7 +81,7 @@ The project includes a convenience script for common operations:
 ./launch.sh help
 
 # Collect historical data from exchanges
-./launch.sh collect --symbols "BTC/USDT" --timeframes "1h"
+./launch.sh collect-data --symbols "BTC/USDT" --timeframes "1h"
 
 # Train a model on the collected data
 ./launch.sh train --symbols "BTC/USDT" --timeframes "1h"
@@ -97,7 +97,26 @@ The project includes a convenience script for common operations:
 
 Key settings in `config/config.yaml`:
 
+The system uses a centralized parameter management approach with ParamManager, which provides:
+
+1. Clear Parameter Precedence:
+
+- Command-line arguments (highest priority)
+- Environment variables
+- Configuration file values
+- Default values (lowest priority)
+
+2. Type-Safe Parameter Access:
+
+- Nested parameter paths with dot notation
+- Default value fallbacks
+- Automatic type conversion
+- Required parameter validation
+
+3. Configuration File:
+
 ```yaml
+
 # Data Collection Settings
 data:
   timeframes: [1m, 5m, 15m, 1h, 4h]
@@ -111,7 +130,32 @@ backtesting:
 
 # Model Selection
 model:
-  type: "bayesian"  # Options: "bayesian", "enhanced_bayesian", "quantum"
+  type: "bayesian"  # Options: "bayesian", "enhanced_bayesian"
+
+```
+
+4. Environment Variables
+You can also set configuration with environment variables in a .env file:
+
+```bash
+# Exchange Configuration
+BINANCE_API_KEY=your_api_key
+BINANCE_API_SECRET=your_secret_key
+BINANCE_TESTNET=true
+
+# Data Configuration
+SYMBOLS=BTC/USDT ETH/USDT
+TIMEFRAMES=1h 4h
+EXCHANGE=binance
+
+# Model Parameters
+MODEL_TYPE=enhanced_bayesian
+```
+
+5. Templates with common parameters
+You can use custom templates that will overwrite variables:
+```bash
+./launch train --template crypto_bluechips
 ```
 
 ## 🔍 Testing Methodologies
@@ -147,6 +191,7 @@ Tests model robustness across different assets and timeframes.
 ```
 quantumtrader/
 ├── config/               # Configuration files
+│   └── templates/        # Template files
 ├── data/                 # Data storage
 │   ├── raw/              # Original data from exchanges
 │   ├── processed/        # Feature-engineered data
@@ -157,6 +202,7 @@ quantumtrader/
 │   ├── features/         # Feature engineering
 │   ├── models/           # Trading models
 │   ├── backtesting/      # Backtesting framework
+│   ├── utils/            # Utility functions
 │   └── visualization/    # Visualization tools
 ├── notebooks/            # Jupyter notebooks
 ├── models/               # Saved model artifacts
@@ -195,7 +241,10 @@ For handling large datasets, smart sampling is implemented:
 Choose between different model implementations:
 
 ```bash
-# Set in config.yaml or environment variable
+# Set model type via command line
+./launch.sh train --symbols "BTC/USDT" --timeframes "1h" --model-type enhanced_bayesian
+
+# Set in config.yaml, your_template.yaml or environment variable
 export MODEL_TYPE=enhanced_bayesian
 ./launch.sh train --symbols "BTC/USDT" --timeframes "1h"
 ```
@@ -209,11 +258,44 @@ Ensure robust model performance with proper validation:
 ```
 
 ### Incremental Training
+Train large datasets in manageable chunks:
+```bash
+./launch.sh incremental --symbols "BTC/USDT" --timeframes "1h" --chunk-size 50000 --overlap 5000
+```
 
-Continue training an existing model with new data:
+Or continue training an existing model with new data:
 
 ```bash
 ./launch.sh continue-train --symbols "BTC/USDT" --timeframes "1h"
+```
+
+Or add custom data in params in your code:
+
+```python
+new_data_df = pd.read_csv('some_custom_data.csv')
+params.set(new_data_df, 'new_data_df')
+
+# Then call continue_training
+model.continue_training()
+```
+
+### Programmatic Parameter Access
+Within your Python code, access parameters consistently:
+```python
+from src.utils.param_manager import ParamManager
+
+# Get global parameter manager
+params = ParamManager.get_instance()
+
+# Access parameters with defaults
+fee_rate = params.get('backtesting', 'fee_rate', default=0.0006)
+symbols = params.get('data', 'symbols')
+
+# Access with type conversion
+test_size = params.get('training', 'test_size', default=0.3, _type=float)
+
+# Required parameters that raise errors if missing
+api_key = params.get('exchanges', 'binance', 'api_key', required=True)
 ```
 
 ## 📊 Visualization
@@ -349,8 +431,11 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 👷🏾 ToDo
 
-- More models, better models! 
+- More models, better models!
+- ✅ Centralized parameter management
+- Data Context
 - Check Multi-symbol/timeframe training and backtesting
 - Base Model class to handle basic methods across all the models
 - Agile feature engineering infrastructure
 - Better plotting utils
+- Proper pathing from config everywhere

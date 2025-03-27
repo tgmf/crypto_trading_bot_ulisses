@@ -12,6 +12,9 @@ data:
   alternative_sources:
     - yfinance
     - cryptocompare
+  path: data
+  raw:
+    path: data/raw
 
 # Model Settings
 model:
@@ -28,11 +31,19 @@ model:
     - macd_hist_diff
     - rsi_diff
     - bb_squeeze
+  path: models
 
+# Strategy Settings
+strategy:
+  type: 'quantum'
+  path: strategies
+
+# Training Settings
 training:
   memory_efficient: True
-  test_size: 0.001     # Small test size
-  max_memory_mb: 8000  # 8GB memory limit
+  test_size: 0.05     # Small test size
+  max_memory_mb: 16000  # 8GB memory limit
+  min_profit_target: 0.001 # Minimum profit target
 
   incremental_training:
     chunk_size: 100000
@@ -45,7 +56,11 @@ backtesting:
   stop_loss: 0.03
   initial_balance: 1
   fee_rate: 0.006
-  min_position_change: 0.025
+  min_position_change: 0.5
+  exaggerate: True
+  test_sets:
+    custom_test_set: None
+    path: data/test_sets
   # slippage: 0.001
   # leverage: 1
   # max_open_trades: 0
@@ -54,6 +69,8 @@ backtesting:
   # max_open_trades_per_symbol: 1
   # max_open_trades_per_side: 1
   # max_open_trades_per_symbol_per_side: 1
+  results:
+    path: data/backtest_results
 
 walk_forward:
   train_window: 180  # Training window in ticks
