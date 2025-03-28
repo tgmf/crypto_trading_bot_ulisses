@@ -78,6 +78,8 @@ def parse_args():
                         help='Train on test set and evaluate on training set')
     parser.add_argument('--test-size', type=float,
                         help='Proportion of data to use for testing (0.0-1.0)')
+    parser.add_argument('--comment', type=str,
+                        help='Comment to add to training results')
     
     # Incremental training parameters
     parser.add_argument('--chunk-size', type=int,

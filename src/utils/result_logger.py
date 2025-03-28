@@ -22,6 +22,7 @@ import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend for headless environments
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+import seaborn as sns
 from pathlib import Path
 from datetime import datetime
 import json
@@ -145,11 +146,9 @@ class ResultLogger:
             dict: Dictionary with file paths of saved visualizations
         """
         # Get parameters from ParamManager
-        exchange = self.params.get('data', 'exchanges', 0)
         symbol = self.params.get('data', 'symbols', 0)
         timeframe = self.params.get('data', 'timeframes', 0)
         results_path = self.params.get('backtesting', 'results', 'path', default='data')
-        data_source = metrics.get("data_source", "unknown")
         
         try:
             # Setup output directory
@@ -162,12 +161,13 @@ class ResultLogger:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             
             # Identify strategy type for proper visualization
-            is_position_sizing = strategy_type == 'position_sizing'
+            is_position_sizing = strategy_type in ['position_sizing', 'position_sizing_exaggerated']
             is_quantum = strategy_type == 'quantum'
             
             #TODO - Add support for other strategy types
             # Create visualization based on strategy type
             if is_position_sizing:
+                self.logger.info(f"Plotting visualizations for {symbol} {timeframe} {strategy_type}")
                 viz_files = self._plot_position_sizing_results(
                     results, metrics, strategy_type, output_dir, timestamp
                 )
@@ -373,238 +373,296 @@ class ResultLogger:
         symbol = self.params.get('data', 'symbols', 0)
         timeframe = self.params.get('data', 'timeframes', 0)
         data_source = metrics.get("data_source", "unknown")
+    
+        # Extract position sizing parameters for the plot subtitle
+        min_position_change = metrics.get("min_position_change", 0.025)
+        no_trade_threshold = metrics.get("no_trade_threshold", 0.96)
+        compound_returns = metrics.get("compound_returns", False)
+        exaggerate = metrics.get("exaggerate_positions", False)
+    
+        # Create parameter info string
+        param_info = (
+            f"Parameters: min_change={min_position_change:.3f}, "
+            f"no_trade_threshold={no_trade_threshold:.2f}, "
+            f"compound={'✓' if compound_returns else '✗'}, "
+            f"exaggerate={'✓' if exaggerate else '✗'}"
+        )
         
         # Ensure results are sorted chronologically
-        if not results.index.is_monotonic_increasing:
-            self.logger.info("Sorting results chronologically for position sizing visualization")
-            results = results.sort_index()
-            self.logger.info(f"Date range: {results.index[0]} to {results.index[-1]}")
+        # if not results.index.is_monotonic_increasing:
+        #     self.logger.info("Sorting results chronologically for position sizing visualization")
+        #     results = results.sort_index()
+        #     self.logger.info(f"Date range: {results.index[0]} to {results.index[-1]}")
+    
+        # Create main chart file paths for explicit reference
+        plot_file = output_dir / f"{strategy_type}_{data_source}_{timestamp}_plot.png"
+        characteristics_file = output_dir / f"{strategy_type}_{data_source}_{timestamp}_characteristics.png"
         
-        # Create figure with 4 subplots for position sizing visualization
-        fig, axes = plt.subplots(4, 1, figsize=(14, 16), 
-                            gridspec_kw={'height_ratios': [2, 1, 1, 1]})
-        
-        # Add data source indicator to title
-        title_prefix = f"TEST SET - " if data_source == "test_set" else ""
-        
-        # 1. Upper plot: Price with shaded position sizes
-        axes[0].plot(results.index, results['close'], label=f'{symbol} Price', alpha=0.7, color='black')
-        
-        # Shade background based on position value
-        for i in range(1, len(results)):
-            # Long positions (green shade)
-            if results['long_position'].iloc[i] > 0:
-                intensity = min(0.4, results['long_position'].iloc[i] * 0.4)  # Cap intensity
-                axes[0].axvspan(results.index[i-1], results.index[i], 
-                            alpha=intensity, color='green', lw=0)
+        # Log exact filenames being created
+        self.logger.info(f"Creating position sizing plots:")
+        self.logger.info(f"  Main plot: {plot_file}")
+        self.logger.info(f"  Characteristics: {characteristics_file}")
+        try:
+            # Create figure with 4 subplots for position sizing visualization
+            fig, axes = plt.subplots(4, 1, figsize=(14, 16), 
+                                gridspec_kw={'height_ratios': [2, 1, 1, 1]})
             
-            # Short positions (red shade)
-            if results['short_position'].iloc[i] > 0:
-                intensity = min(0.4, results['short_position'].iloc[i] * 0.4)  # Cap intensity
-                axes[0].axvspan(results.index[i-1], results.index[i], 
-                            alpha=intensity, color='red', lw=0)
+            # Add data source indicator to title
+            title_prefix = f"TEST SET - " if data_source == "test_set" else ""
+            
+            # Add parameter info to figure title
+            plt.suptitle(f"{title_prefix}{symbol} {timeframe} Position Sizing Strategy\n{param_info}", 
+                        fontsize=14, y=0.98)
         
-        axes[0].set_title(f'{title_prefix}{symbol} {timeframe} Price with Position Sizing')
-        axes[0].set_ylabel('Price')
-        axes[0].legend()
-        axes[0].grid(True, alpha=0.3)
-        
-        # 2. Second plot: Cumulative returns comparison
-        buy_hold_col = 'price_cumulative'
-        strategy_col = 'strategy_cumulative'
-        long_col = 'long_cumulative' if 'long_cumulative' in results.columns else None
-        short_col = 'short_cumulative' if 'short_cumulative' in results.columns else None
-        
-        axes[1].plot(results.index, results[buy_hold_col], label='Buy & Hold', color='blue', alpha=0.7)
-        axes[1].plot(results.index, results[strategy_col], label=f'Combined Strategy', color='purple')
-        
-        if long_col:
-            axes[1].plot(results.index, results[long_col], label='Long Only', color='green', alpha=0.7, linestyle='--')
-        if short_col:
-            axes[1].plot(results.index, results[short_col], label='Short Only', color='red', alpha=0.7, linestyle='--')
-        
-        axes[1].axhline(y=0, color='black', linestyle='-', alpha=0.3)
-        axes[1].set_title(f'{title_prefix}Cumulative Returns')
-        axes[1].set_ylabel('Return')
-        axes[1].legend()
-        axes[1].grid(True, alpha=0.3)
-        
-        # 3. Third plot: Position sizes over time
-        axes[2].plot(results.index, results['long_position'], label='Long', color='green')
-        axes[2].plot(results.index, results['short_position'], label='Short', color='red')
-        
-        # Calculate net position
-        if 'position' not in results.columns:
-            results['position'] = results['long_position'] - results['short_position']
-        
-        axes[2].plot(results.index, results['position'], label='Net', color='black', alpha=0.5)
-        axes[2].axhline(y=0, color='black', linestyle='--', alpha=0.3)
-        axes[2].set_title('Position Sizes')
-        axes[2].set_ylabel('Size')
-        axes[2].legend()
-        axes[2].grid(True, alpha=0.3)
-        
-        # 4. Fourth plot: Compound factor if available
-        if 'compound_factor' in results.columns:
-            axes[3].plot(results.index, results['compound_factor'], 
-                        label='Account Growth Factor', color='purple')
-            axes[3].axhline(y=1.0, color='black', linestyle='--', alpha=0.5)
-            axes[3].set_title('Account Growth Factor')
-            axes[3].set_ylabel('Multiplier')
-            axes[3].legend()
-            axes[3].grid(True, alpha=0.3)
-        else:
-            # If no compound factor, show probabilities
-            if all(col in results.columns for col in ['long_prob', 'short_prob', 'no_trade_prob']):
-                axes[3].plot(results.index, results['long_prob'], label='Long Probability', color='green')
-                axes[3].plot(results.index, results['short_prob'], label='Short Probability', color='red')
-                axes[3].plot(results.index, results['no_trade_prob'], label='No-Trade Probability', color='gray')
-                axes[3].set_title('Signal Probabilities')
-                axes[3].set_ylabel('Probability')
+            # Add top margin for the title
+            plt.subplots_adjust(top=0.95)
+            
+            # 1. Upper plot: Price with shaded position sizes
+            axes[0].plot(results.index, results['close'], label=f'{symbol} Price', alpha=0.7, color='black')
+            
+            # Shade background based on position value
+            for i in range(1, len(results)):
+                # Long positions (green shade)
+                if results['long_position'].iloc[i] > 0:
+                    intensity = min(0.4, results['long_position'].iloc[i] * 0.4)  # Cap intensity
+                    axes[0].axvspan(results.index[i-1], results.index[i], 
+                                alpha=intensity, color='green', lw=0)
+                
+                # Short positions (red shade)
+                if results['short_position'].iloc[i] > 0:
+                    intensity = min(0.4, results['short_position'].iloc[i] * 0.4)  # Cap intensity
+                    axes[0].axvspan(results.index[i-1], results.index[i], 
+                                alpha=intensity, color='red', lw=0)
+            
+            axes[0].set_ylabel('Price')
+            axes[0].legend()
+            axes[0].grid(True, alpha=0.3)
+            
+            # 2. Second plot: Cumulative returns comparison
+            buy_hold_col = 'price_cumulative' if 'price_cumulative' in results.columns else 'cumulative_returns'
+            strategy_col = 'strategy_cumulative'
+            long_col = 'long_cumulative' if 'long_cumulative' in results.columns else None
+            short_col = 'short_cumulative' if 'short_cumulative' in results.columns else None
+            
+            if buy_hold_col in results.columns and strategy_col in results.columns:
+                axes[1].plot(results.index, results[buy_hold_col], label='Buy & Hold', color='blue', alpha=0.7)
+                axes[1].plot(results.index, results[strategy_col], label='Combined Strategy', color='purple')
+                
+                if long_col and long_col in results.columns:
+                    axes[1].plot(results.index, results[long_col], label='Long Only', color='green', alpha=0.7, linestyle='--')
+                if short_col and short_col in results.columns:
+                    axes[1].plot(results.index, results[short_col], label='Short Only', color='red', alpha=0.7, linestyle='--')
+                
+                axes[1].axhline(y=0, color='black', linestyle='-', alpha=0.3)
+                axes[1].set_ylabel('Return')
+                axes[1].legend()
+                axes[1].grid(True, alpha=0.3)
+            else:
+                axes[1].text(0.5, 0.5, "No cumulative return data available", 
+                            ha='center', va='center', transform=axes[1].transAxes)
+            
+            # 3. Third plot: Position sizes over time
+            if 'long_position' in results.columns and 'short_position' in results.columns:
+                axes[2].plot(results.index, results['long_position'], label='Long', color='green')
+                axes[2].plot(results.index, results['short_position'], label='Short', color='red')
+                
+                # Calculate net position
+                if 'position' not in results.columns:
+                    results['position'] = results['long_position'] - results['short_position']
+                
+                axes[2].plot(results.index, results['position'], label='Net', color='black', alpha=0.5)
+                axes[2].axhline(y=0, color='black', linestyle='--', alpha=0.3)
+                axes[2].set_ylabel('Position Size')
+                axes[2].legend()
+                axes[2].grid(True, alpha=0.3)
+            else:
+                axes[2].text(0.5, 0.5, "No position size data available", 
+                            ha='center', va='center', transform=axes[2].transAxes)
+            
+            # 4. Fourth plot: Compound factor if available
+            if 'compound_factor' in results.columns:
+                axes[3].plot(results.index, results['compound_factor'], 
+                            label='Account Growth Factor', color='purple')
+                axes[3].axhline(y=1.0, color='black', linestyle='--', alpha=0.5)
+                axes[3].set_ylabel('Multiplier')
                 axes[3].legend()
                 axes[3].grid(True, alpha=0.3)
-        
-        # Format x-axis date labels
-        for ax in axes:
-            ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
-            if len(results) < 20:  # For shorter timeframes, add day labels
-                ax.xaxis.set_major_locator(mdates.DayLocator())
-                plt.setp(ax.xaxis.get_majorticklabels(), rotation=45)
-            elif len(results) < 180:  # For medium timeframes, show weekly labels
-                ax.xaxis.set_major_locator(mdates.WeekdayLocator())
-                plt.setp(ax.xaxis.get_majorticklabels(), rotation=45)
-            else:  # For longer timeframes, show monthly labels
-                ax.xaxis.set_major_locator(mdates.MonthLocator())
-                plt.setp(ax.xaxis.get_majorticklabels(), rotation=45)
-        
-        plt.tight_layout(pad=1.5)
-        
-        # Save figure
-        plot_file = output_dir / f"{strategy_type}_{data_source}_{timestamp}_plot.png"
-        plt.savefig(plot_file, dpi=120, bbox_inches='tight')
-        plt.close(fig)
-        
-        # Create additional plots
-        
-        # Plot 1: Position sizing characteristics
-        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-        
-        # Top left: Position size distribution
-        if 'long_position' in results.columns and 'short_position' in results.columns:
-            position_data = pd.concat([
-                results['long_position'].rename('Long'),
-                results['short_position'].rename('Short')
-            ], axis=1)
-            
-            # Create histogram with bins from 0 to 1
-            bins = np.linspace(0, 1, 21)  # 20 bins from 0 to 1
-            
-            # Plot histograms
-            axes[0, 0].hist(position_data['Long'][position_data['Long'] > 0], bins=bins, 
-                        alpha=0.7, color='green', label='Long')
-            axes[0, 0].hist(position_data['Short'][position_data['Short'] > 0], bins=bins, 
-                        alpha=0.7, color='red', label='Short')
-            axes[0, 0].set_title('Position Size Distribution')
-            axes[0, 0].set_xlabel('Position Size')
-            axes[0, 0].set_ylabel('Frequency')
-            axes[0, 0].legend()
-            axes[0, 0].grid(True, alpha=0.3)
-        else:
-            axes[0, 0].text(0.5, 0.5, "No position size data", ha='center', va='center')
-            axes[0, 0].set_title('Position Size Distribution')
-        
-        # Top right: Position changes
-        if 'long_change' in results.columns and 'short_change' in results.columns:
-            non_zero_long = results['long_change'][results['long_change'] > 0]
-            non_zero_short = results['short_change'][results['short_change'] > 0]
-            
-            if len(non_zero_long) > 0 or len(non_zero_short) > 0:
-                axes[0, 1].hist(non_zero_long, bins=20, alpha=0.7, color='green', label='Long Changes')
-                axes[0, 1].hist(non_zero_short, bins=20, alpha=0.7, color='red', label='Short Changes')
-                axes[0, 1].set_title('Position Size Changes (When Changed)')
-                axes[0, 1].set_xlabel('Size of Change')
-                axes[0, 1].set_ylabel('Frequency')
-                axes[0, 1].legend()
-                axes[0, 1].grid(True, alpha=0.3)
             else:
-                axes[0, 1].text(0.5, 0.5, "No position change data", ha='center', va='center')
-                axes[0, 1].set_title('Position Size Changes')
-        else:
-            axes[0, 1].text(0.5, 0.5, "No position change data", ha='center', va='center')
-            axes[0, 1].set_title('Position Size Changes')
-        
-        # Bottom left: Returns distribution
-        if 'net_return' in results.columns:
-            net_returns = results['net_return'].dropna() * 100  # Convert to percentage
-            
-            if len(net_returns) > 0:
-                axes[1, 0].hist(net_returns, bins=30, alpha=0.7, color='purple')
-                axes[1, 0].axvline(x=0, color='black', linestyle='--', alpha=0.7)
-                axes[1, 0].set_title('Return Distribution')
-                axes[1, 0].set_xlabel('Return (%)')
-                axes[1, 0].set_ylabel('Frequency')
-                axes[1, 0].grid(True, alpha=0.3)
-            else:
-                axes[1, 0].text(0.5, 0.5, "No return data", ha='center', va='center')
-                axes[1, 0].set_title('Return Distribution')
-        else:
-            axes[1, 0].text(0.5, 0.5, "No return data", ha='center', va='center')
-            axes[1, 0].set_title('Return Distribution')
-        
-        # Bottom right: Fee impact
-        if 'fee_impact' in results.columns and 'net_return' in results.columns:
-            # Calculate cumulative values
-            cum_fees = results['fee_impact'].sum() * 100  # Convert to percentage
-            cum_returns = results['net_return'].sum() * 100
-            gross_returns = cum_returns + cum_fees
-            
-            # Create data for bar chart
-            fee_data = [gross_returns, -cum_fees, cum_returns]
-            labels = ['Gross Return', 'Fee Impact', 'Net Return']
-            colors = ['green', 'red', 'blue']
-            
-            # Plot bars
-            bars = axes[1, 1].bar(labels, fee_data, color=colors)
-            
-            # Add value labels
-            for bar in bars:
-                height = bar.get_height()
-                if height < 0:
-                    # For negative values, place text below bar
-                    axes[1, 1].text(
-                        bar.get_x() + bar.get_width()/2.,
-                        height - 1,
-                        f'{height:.2f}%',
-                        ha='center', va='top'
-                    )
+                # Alternative: Show probabilities
+                if all(col in results.columns for col in ['long_prob', 'short_prob', 'no_trade_prob']):
+                    axes[3].plot(results.index, results['long_prob'], label='Long Probability', color='green')
+                    axes[3].plot(results.index, results['short_prob'], label='Short Probability', color='red')
+                    axes[3].plot(results.index, results['no_trade_prob'], label='No-Trade Probability', color='gray')
+                    axes[3].set_ylabel('Probability')
+                    axes[3].legend()
+                    axes[3].grid(True, alpha=0.3)
                 else:
-                    # For positive values, place text above bar
-                    axes[1, 1].text(
-                        bar.get_x() + bar.get_width()/2.,
-                        height + 0.5,
-                        f'{height:.2f}%',
-                        ha='center', va='bottom'
-                    )
+                    axes[3].text(0.5, 0.5, "No account growth data available", 
+                                ha='center', va='center', transform=axes[3].transAxes)
             
-            axes[1, 1].axhline(y=0, color='black', linestyle='-', alpha=0.3)
-            axes[1, 1].set_title('Fee Impact Analysis')
-            axes[1, 1].set_ylabel('Percentage (%)')
-            axes[1, 1].grid(True, alpha=0.3)
-        else:
-            axes[1, 1].text(0.5, 0.5, "No fee data", ha='center', va='center')
-            axes[1, 1].set_title('Fee Impact Analysis')
+            # Format x-axis date labels
+            for ax in axes:
+                ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+                if len(results) < 20:  # For shorter timeframes, add day labels
+                    ax.xaxis.set_major_locator(mdates.DayLocator())
+                    plt.setp(ax.xaxis.get_majorticklabels(), rotation=45)
+                elif len(results) < 180:  # For medium timeframes, show weekly labels
+                    ax.xaxis.set_major_locator(mdates.WeekdayLocator())
+                    plt.setp(ax.xaxis.get_majorticklabels(), rotation=45)
+                else:  # For longer timeframes, show monthly labels
+                    ax.xaxis.set_major_locator(mdates.MonthLocator())
+                    plt.setp(ax.xaxis.get_majorticklabels(), rotation=45)
+            
+            # Only the bottom plot should have a visible x-label
+            for i in range(3):
+                axes[i].set_xticklabels([])
+            
+            plt.tight_layout(rect=[0, 0, 1, 0.95], pad=1.5)
+            
+            # Save figure
+            plt.savefig(plot_file, dpi=120, bbox_inches='tight')
+            plt.close(fig)
+            
+            # Now create the characteristics plot
+            try:
+                # Create figure
+                fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+                
+                # Add title with parameters
+                plt.suptitle(f"{title_prefix}{symbol} {timeframe} Position Sizing Characteristics\n{param_info}", 
+                            fontsize=14, y=0.98)
+                
+                # Add top margin for the title
+                plt.subplots_adjust(top=0.92)
+                
+                # Top left: Position size distribution
+                if 'long_position' in results.columns and 'short_position' in results.columns:
+                    position_data = pd.concat([
+                        results['long_position'].rename('Long'),
+                        results['short_position'].rename('Short')
+                    ], axis=1)
+                    
+                    # Create histogram with bins from 0 to 1
+                    bins = np.linspace(0, 1, 21)  # 20 bins from 0 to 1
+                    
+                    # Plot histograms
+                    axes[0, 0].hist(position_data['Long'][position_data['Long'] > 0], bins=bins, 
+                                alpha=0.7, color='green', label='Long')
+                    axes[0, 0].hist(position_data['Short'][position_data['Short'] > 0], bins=bins, 
+                                alpha=0.7, color='red', label='Short')
+                    axes[0, 0].set_title('Position Size Distribution')
+                    axes[0, 0].set_xlabel('Position Size')
+                    axes[0, 0].set_ylabel('Frequency')
+                    axes[0, 0].legend()
+                    axes[0, 0].grid(True, alpha=0.3)
+                else:
+                    axes[0, 0].text(0.5, 0.5, "No position size data", ha='center', va='center')
+                    axes[0, 0].set_title('Position Size Distribution')
+                
+                # Top right: Position changes
+                if 'long_change' in results.columns and 'short_change' in results.columns:
+                    non_zero_long = results['long_change'][results['long_change'] > 0]
+                    non_zero_short = results['short_change'][results['short_change'] > 0]
+                    
+                    if len(non_zero_long) > 0 or len(non_zero_short) > 0:
+                        axes[0, 1].hist(non_zero_long, bins=20, alpha=0.7, color='green', label='Long Changes')
+                        axes[0, 1].hist(non_zero_short, bins=20, alpha=0.7, color='red', label='Short Changes')
+                        axes[0, 1].set_title('Position Size Changes (When Changed)')
+                        axes[0, 1].set_xlabel('Size of Change')
+                        axes[0, 1].set_ylabel('Frequency')
+                        axes[0, 1].legend()
+                        axes[0, 1].grid(True, alpha=0.3)
+                    else:
+                        axes[0, 1].text(0.5, 0.5, "No position change data", ha='center', va='center', transform=axes[0, 1].transAxes)
+                        axes[0, 1].set_title('Position Size Changes')
+                else:
+                    axes[0, 1].text(0.5, 0.5, "No position change data", ha='center', va='center', transform=axes[0, 1].transAxes)
+                    axes[0, 1].set_title('Position Size Changes')
+                
+                # Bottom left: Returns distribution
+                if 'net_return' in results.columns:
+                    net_returns = results['net_return'].dropna() * 100  # Convert to percentage
+                    
+                    if len(net_returns) > 0:
+                        axes[1, 0].hist(net_returns, bins=30, alpha=0.7, color='purple')
+                        axes[1, 0].axvline(x=0, color='black', linestyle='--', alpha=0.7)
+                        axes[1, 0].set_title('Return Distribution')
+                        axes[1, 0].set_xlabel('Return (%)')
+                        axes[1, 0].set_ylabel('Frequency')
+                        axes[1, 0].grid(True, alpha=0.3)
+                    else:
+                        axes[1, 0].text(0.5, 0.5, "No return data", ha='center', va='center', transform=axes[1, 0].transAxes)
+                        axes[1, 0].set_title('Return Distribution')
+                else:
+                    axes[1, 0].text(0.5, 0.5, "No return data", ha='center', va='center', transform=axes[1, 0].transAxes)
+                    axes[1, 0].set_title('Return Distribution')
+                
+                # Bottom right: Fee impact
+                if 'fee_impact' in results.columns and 'net_return' in results.columns:
+                    # Calculate cumulative values
+                    cum_fees = results['fee_impact'].sum() * 100  # Convert to percentage
+                    cum_returns = results['net_return'].sum() * 100
+                    gross_returns = cum_returns + cum_fees
+                    
+                    # Create data for bar chart
+                    fee_data = [gross_returns, -cum_fees, cum_returns]
+                    labels = ['Gross Return', 'Fee Impact', 'Net Return']
+                    colors = ['green', 'red', 'blue']
+                    
+                    # Plot bars
+                    bars = axes[1, 1].bar(labels, fee_data, color=colors)
+                    
+                    # Add value labels
+                    for bar in bars:
+                        height = bar.get_height()
+                        if height < 0:
+                            # For negative values, place text below bar
+                            axes[1, 1].text(
+                                bar.get_x() + bar.get_width()/2.,
+                                height - 1,
+                                f'{height:.2f}%',
+                                ha='center', va='top'
+                            )
+                        else:
+                            # For positive values, place text above bar
+                            axes[1, 1].text(
+                                bar.get_x() + bar.get_width()/2.,
+                                height + 0.5,
+                                f'{height:.2f}%',
+                                ha='center', va='bottom'
+                            )
+                    
+                    axes[1, 1].axhline(y=0, color='black', linestyle='-', alpha=0.3)
+                    axes[1, 1].set_title('Fee Impact Analysis')
+                    axes[1, 1].set_ylabel('Percentage (%)')
+                    axes[1, 1].grid(True, alpha=0.3)
+                else:
+                    axes[1, 1].text(0.5, 0.5, "No fee data", ha='center', va='center', transform=axes[1, 1].transAxes)
+                    axes[1, 1].set_title('Fee Impact Analysis')
+                
+                plt.tight_layout(rect=[0, 0, 1, 0.92])  # Adjust for the suptitle
+                
+                # Save characteristics plot with explicit path
+                plt.savefig(characteristics_file, dpi=120, bbox_inches='tight')
+                plt.close(fig)
+                
+                # Return both file paths for tracking
+                return {
+                    'main_plot': str(plot_file),
+                    'characteristics': str(characteristics_file)
+                }
+                
+            except Exception as e:
+                self.logger.error(f"Error creating characteristics plot: {str(e)}")
+                import traceback
+                self.logger.error(traceback.format_exc())
+                return {'main_plot': str(plot_file)}
         
-        plt.tight_layout(pad=1.5)
-        
-        # Save position sizing characteristics figure
-        characteristics_file = output_dir / f"{strategy_type}_{data_source}_{timestamp}_characteristics.png"
-        plt.savefig(characteristics_file, dpi=120, bbox_inches='tight')
-        plt.close(fig)
-        
-        return {
-            'main_plot': str(plot_file),
-            'characteristics': str(characteristics_file)
-        }
+        except Exception as e:
+            self.logger.error(f"Error in position sizing visualization: {str(e)}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            return {}
     
     def _plot_performance_metrics(self, metrics, strategy_type, output_dir, timestamp):
         """Create a visualization of key performance metrics"""
@@ -612,6 +670,23 @@ class ResultLogger:
         symbol = self.params.get('data', 'symbols', 0)
         timeframe = self.params.get('data', 'timeframes', 0)
         data_source = metrics.get("data_source", "unknown")
+    
+        # Extract position sizing parameters for the plot subtitle if this is position sizing
+        param_info = ""
+        if "position_sizing" in strategy_type:
+            min_position_change = metrics.get("min_position_change", 0.025)
+            no_trade_threshold = metrics.get("no_trade_threshold", 0.96)
+            compound_returns = metrics.get("compound_returns", False)
+            exaggerate = metrics.get("exaggerate_positions", False)
+            
+            # Create parameter info string
+            param_info = (
+                f"Parameters: min_change={min_position_change:.3f}, "
+                f"no_trade_threshold={no_trade_threshold:.2f}, "
+                f"compound={'✓' if compound_returns else '✗'}, "
+                f"exaggerate={'✓' if exaggerate else '✗'}"
+            )
+        
         try:
             fig, axes = plt.subplots(2, 2, figsize=(12, 10))
             
@@ -711,9 +786,14 @@ class ResultLogger:
                     axes[3].text(0.5, 0.5, 'No profit factor data available', 
                                 ha='center', va='center', transform=axes[3].transAxes)
             
-            # Add overall title and adjust layout
-            plt.suptitle(f'{symbol} {timeframe} - {strategy_type.replace("_", " ").title()} Performance Metrics', 
-                            fontsize=16, y=0.98)
+            # Add title with parameters if available
+            title = f'{symbol} {timeframe} - {strategy_type.replace("_", " ").title()} Performance Metrics'
+            if param_info:
+                fig.suptitle(f"{title}\n{param_info}", fontsize=14, y=0.98)
+                plt.subplots_adjust(top=0.92)  # Make room for the title
+            else:
+                fig.suptitle(title, fontsize=14)
+                
             plt.tight_layout(rect=[0, 0, 1, 0.96], pad=2.0)
             
             # Save figure
@@ -1345,3 +1425,30 @@ class ResultLogger:
             import traceback
             self.logger.error(traceback.format_exc())
             return False
+        
+    # Copy useful visualization methods from VisualizationTool
+
+# For example, add these methods:
+def plot_probability_distribution(self, results, metrics, output_dir, timestamp):
+    """Plot probability distributions from VisualizationTool"""
+    try:
+        # Create figure
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        
+        # Plot probability distributions
+        sns.histplot(results['long_prob'], kde=True, color='green', ax=axes[0, 0])
+        axes[0, 0].set_title('Long Probability Distribution')
+        axes[0, 0].set_xlabel('Probability')
+        axes[0, 0].set_ylabel('Frequency')
+        
+        # Rest of the method from VisualizationTool...
+        
+        # Save with consistent naming
+        plot_file = output_dir / f"probability_dist_{timestamp}.png"
+        plt.savefig(plot_file, dpi=120, bbox_inches='tight')
+        plt.close(fig)
+        
+        return str(plot_file)
+    except Exception as e:
+        self.logger.error(f"Error plotting probability distributions: {str(e)}")
+        return None

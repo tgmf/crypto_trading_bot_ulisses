@@ -52,7 +52,7 @@ class BayesianModel:
         
         # Extract model parameters from params
         self.fee_rate = self.params.get('backtesting', 'fee_rate', default=0.0006)
-        self.min_profit = self.params.get('backtesting', 'min_profit_target', default=0.0001)
+        self.min_profit = self.params.get('backtesting', 'min_profit_target', default=0.01)
         
         # Feature columns to use for prediction
         self.feature_cols = self.params.get('model', 'feature_cols', default=[
@@ -82,7 +82,6 @@ class BayesianModel:
         Returns:
             ndarray: Array of target values (-1, 0, or 1)
         """
-        # Your existing target creation code remains unchanged
         n_samples = len(df)
         targets = np.zeros(n_samples)
         
@@ -1644,6 +1643,8 @@ class BayesianModel:
                 self.logger.warning(f"Failed to configure JAX: {e}, continuing without acceleration")
                 self.using_jax_acceleration = False
                 
+    
+        
     def run_backtest_with_position_sizing(self, df, no_trade_threshold=0.96, 
                                             min_position_change=0.025, compound_returns=True, exaggerate=True):
         """
@@ -1668,6 +1669,8 @@ class BayesianModel:
         """
         symbol = self.params.get('data', 'symbols', 0)
         timeframe = self.params.get('data', 'timeframes', 0)
+        exaggerate = self.params.get('backtesting', 'exaggerate', default=exaggerate)
+        min_position_change = self.params.get('backtesting', 'min_position_change', default=min_position_change)
         
         self.logger.info(f"Running position sizing backtest for {symbol} {timeframe}")
         
@@ -1756,6 +1759,8 @@ class BayesianModel:
             # Handle each position type separately
             results['long_position'] = 0.0
             results['short_position'] = 0.0
+            prev_long = 0.0
+            prev_short = 0.0
             
             # 8. Calculate price return
             results['price_return'] = results['close'].pct_change()
@@ -1765,6 +1770,8 @@ class BayesianModel:
             realized_pnl = 0.0     # Track realized P&L for compounding
             prev_long = 0.0
             prev_short = 0.0
+            
+            account_size = 1.0
             
             for i in range(len(results)):
                 # Get raw position signals based on probabilities
@@ -1881,6 +1888,12 @@ class BayesianModel:
             # 16. Calculate performance metrics
             metrics = self._calculate_position_sizing_metrics(results, min_position_change)
             
+            # Information about the backtest
+            metrics['min_position_change'] = min_position_change
+            metrics['no_trade_threshold'] = no_trade_threshold
+            metrics['compound_returns'] = compound_returns
+            metrics['exaggerate_positions'] = exaggerate
+            
             # Add compounding information to metrics
             if compound_returns:
                 metrics['compound_returns'] = True
@@ -1904,13 +1917,13 @@ class BayesianModel:
             
             # 17. Create visualization using result logger
             from ..utils.result_logger import ResultLogger
-            result_logger = ResultLogger(self.params)
+            result_logger = ResultLogger(getattr(self, 'params', {}))
 
             # Strategy type suffix based on exaggeration
             strategy_type = 'position_sizing_exaggerated' if exaggerate else 'position_sizing'
 
             # Save results to standardized formats
-            result_logger.save_results(results, metrics, strategy_type=strategy_type)
+            files = result_logger.save_results(results, metrics, strategy_type=strategy_type)
 
             # Create visualizations
             viz_files = result_logger.plot_results(results, metrics, strategy_type=strategy_type)
@@ -1950,6 +1963,9 @@ class BayesianModel:
         final_long_return = valid_results['long_cumulative'].iloc[-1] if 'long_cumulative' in valid_results.columns else 0
         final_short_return = valid_results['short_cumulative'].iloc[-1] if 'short_cumulative' in valid_results.columns else 0
         
+        # Get timeframe from params
+        timeframe = self.params.get('data', 'timeframes', 0)
+    
         # Calculate Sharpe ratio (annualized)
         # Assuming daily data, adjust for other timeframes
         timeframe_multiplier = {
@@ -1964,89 +1980,107 @@ class BayesianModel:
         }
         
         # Default to daily if timeframe not recognized
-        multiplier = timeframe_multiplier.get('1d', 365)
+        multiplier = timeframe_multiplier.get(timeframe, 365)
         
         returns_mean = valid_results['net_return'].mean()
         returns_std = valid_results['net_return'].std()
         sharpe = (returns_mean / returns_std) * np.sqrt(multiplier) if returns_std > 0 else 0
         
         # Calculate max drawdown
-        cum_returns = valid_results['strategy_cumulative']
-        running_max = cum_returns.cummax()
-        drawdown = (cum_returns - running_max) / (1 + running_max)
-        max_drawdown = drawdown.min()
+        cumulative = valid_results['strategy_cumulative'].values
+        max_dd, max_dd_duration = self._calculate_max_drawdown(cumulative)
+    
+        # Calculate position metrics
+        position_changes = np.sum(
+            (valid_results['long_position'].diff().abs() + valid_results['short_position'].diff().abs()) > min_position_change
+        )
+    
+        # Calculate trade metrics - a trade happens when position changes
+        long_changes = valid_results['long_position'].diff().abs() > min_position_change
+        short_changes = valid_results['short_position'].diff().abs() > min_position_change
         
-        # Calculate win rate
-        daily_returns = valid_results.resample('D')['net_return'].sum().dropna()
-        win_rate = (daily_returns > 0).mean()
-        
-        # Calculate profit factor
-        winning_days = daily_returns[daily_returns > 0].sum()
-        losing_days = abs(daily_returns[daily_returns < 0].sum())
-        profit_factor = winning_days / losing_days if losing_days != 0 else float('inf')
-        
-        # Calculate alpha (excess return over buy & hold)
-        alpha = final_strategy_return - final_price_return
-        
+        # Track returns on position changes
+        trade_returns = []
+        for i in range(1, len(valid_results)):
+            if long_changes.iloc[i] or short_changes.iloc[i]:
+                # Calculate return since last change
+                # This is a simplified approach - for precise returns we'd need entry/exit prices
+                # But this gives us a way to estimate trade-level metrics
+                trade_returns.append(valid_results['net_return'].iloc[i])
+            
+        # Calculate win rate and average win/loss
+        if trade_returns:
+            win_count = sum(ret > 0 for ret in trade_returns)
+            loss_count = sum(ret < 0 for ret in trade_returns)
+            win_rate = win_count / len(trade_returns) if len(trade_returns) > 0 else 0
+            
+            # Average win and loss
+            win_returns = [ret for ret in trade_returns if ret > 0]
+            loss_returns = [ret for ret in trade_returns if ret < 0]
+            
+            avg_win = sum(win_returns) / len(win_returns) if win_returns else 0
+            avg_loss = sum(loss_returns) / len(loss_returns) if loss_returns else 0
+            
+            # Profit factor
+            gross_profit = sum(win_returns)
+            gross_loss = abs(sum(loss_returns))
+            profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
+        else:
+            win_rate = 0
+            avg_win = 0
+            avg_loss = 0
+            profit_factor = 0
+    
         # Calculate fee impact
-        total_fees = valid_results['fee_impact'].sum()
-        total_return_before_fees = (1 + valid_results['strategy_return']).cumprod().iloc[-1] - 1
-        total_return_after_fees = (1 + valid_results['net_return']).cumprod().iloc[-1] - 1
-        fee_drag = total_return_before_fees - total_return_after_fees
+        total_fees = valid_results['fee_impact'].sum() if 'fee_impact' in valid_results.columns else 0
+        fee_drag = total_fees
+    
+        # Calculate other metrics
+        alpha = final_strategy_return - final_price_return  # Excess return over buy & hold
         
-        # Count number of position changes
-        long_changes = (valid_results['long_change'] > min_position_change).sum() if 'long_change' in valid_results.columns else 0
-        short_changes = (valid_results['short_change'] > min_position_change).sum() if 'short_change' in valid_results.columns else 0
-        
-        # Position exposure metrics
-        long_exposure = valid_results['long_position'].mean()
-        short_exposure = valid_results['short_position'].mean()
-        net_exposure = long_exposure - short_exposure
-        
-        # Calculate long-only metrics
-        if 'long_return' in valid_results.columns:
-            long_returns = valid_results['long_return']
-            long_win_rate = (long_returns > 0).mean() if (valid_results['long_position'] > 0).any() else 0
-            long_sharpe = (long_returns.mean() / long_returns.std()) * np.sqrt(multiplier) if long_returns.std() > 0 else 0
-        else:
-            long_win_rate = 0
-            long_sharpe = 0
-        
-        # Calculate short-only metrics
-        if 'short_return' in valid_results.columns:
-            short_returns = valid_results['short_return']
-            short_win_rate = (short_returns > 0).mean() if (valid_results['short_position'] > 0).any() else 0
-            short_sharpe = (short_returns.mean() / short_returns.std()) * np.sqrt(multiplier) if short_returns.std() > 0 else 0
-        else:
-            short_win_rate = 0
-            short_sharpe = 0
-        
-        # Create metrics dictionary
+        # Create metrics dictionary with ALL required keys
         metrics = {
-            'total_return': final_strategy_return,
+            'final_return': final_strategy_return,
             'buy_hold_return': final_price_return,
             'long_only_return': final_long_return,
             'short_only_return': final_short_return,
             'alpha': alpha,
             'sharpe_ratio': sharpe,
-            'long_sharpe': long_sharpe,
-            'short_sharpe': short_sharpe,
-            'max_drawdown': max_drawdown,
+            'max_drawdown': max_dd,
+            'max_dd_duration': max_dd_duration,
+            'total_trades': len(trade_returns),
+            'position_changes': position_changes,
             'win_rate': win_rate,
-            'long_win_rate': long_win_rate,
-            'short_win_rate': short_win_rate,
+            'avg_win': avg_win,
+            'avg_loss': avg_loss,
             'profit_factor': profit_factor,
-            'long_changes': long_changes,
-            'short_changes': short_changes,
-            'total_position_changes': long_changes + short_changes,
             'fee_drag': fee_drag,
-            'total_fees': total_fees,
-            'total_trading_days': len(daily_returns),
-            'long_exposure': long_exposure,
-            'short_exposure': short_exposure,
-            'net_exposure': net_exposure,
-            'avg_long_size': valid_results[valid_results['long_position'] > 0]['long_position'].mean() if (valid_results['long_position'] > 0).any() else 0,
-            'avg_short_size': valid_results[valid_results['short_position'] > 0]['short_position'].mean() if (valid_results['short_position'] > 0).any() else 0
+            'min_position_change': min_position_change
         }
         
         return metrics
+
+    def _calculate_max_drawdown(self, cumulative_returns):
+        """Calculate maximum drawdown and duration from cumulative returns array"""
+        # Check for valid input
+        if len(cumulative_returns) < 2:
+            return 0, 0
+            
+        # Starting with 1 + returns, not percentage form
+        cum_returns = 1 + np.array(cumulative_returns)
+        
+        # Calculate running maximum
+        running_max = np.maximum.accumulate(cum_returns)
+        
+        # Calculate drawdown in percentage terms
+        drawdown = (cum_returns - running_max) / running_max
+        
+        # Find the maximum drawdown
+        max_drawdown = np.min(drawdown)
+        
+        # Calculate drawdown duration
+        drawdown_start = np.argmax(cum_returns[:np.argmin(drawdown)])
+        drawdown_end = np.argmin(drawdown)
+        drawdown_duration = drawdown_end - drawdown_start
+        
+        return abs(max_drawdown), drawdown_duration

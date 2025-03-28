@@ -43,7 +43,7 @@ training:
   memory_efficient: True
   test_size: 0.05     # Small test size
   max_memory_mb: 16000  # 8GB memory limit
-  min_profit_target: 0.001 # Minimum profit target
+  min_profit_target: 0.1 # Minimum profit target
 
   incremental_training:
     chunk_size: 100000
@@ -56,8 +56,8 @@ backtesting:
   stop_loss: 0.03
   initial_balance: 1
   fee_rate: 0.006
-  min_position_change: 0.5
-  exaggerate: True
+  min_position_change: 0.0382
+  exaggerate: False
   test_sets:
     custom_test_set: None
     path: data/test_sets
