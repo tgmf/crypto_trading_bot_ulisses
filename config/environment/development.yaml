@@ -1,0 +1,30 @@
+# Data Collection Settings
+data:
+  path: data
+  raw:
+    path: data/raw
+
+# Model Settings
+model:
+  max_samples_per_batch: 100000
+  path: models
+
+# Strategy Settings
+strategy:
+  path: strategies
+
+# Training Settings
+training:
+  memory_efficient: True
+  max_memory_mb: 16000  # Memory limit
+
+  incremental_training:
+    chunk_size: 100000
+    checkpoint_frequency: 1  # Save after each chunk
+  
+# Backtesting Settings
+backtesting:
+  test_sets:
+    path: data/test_sets
+  results:
+    path: data/backtest_results

@@ -24,8 +24,8 @@ import pickle
 import json
 import matplotlib.pyplot as plt
 from datetime import datetime
-from ..utils.result_logger import ResultLogger
-from ..utils.param_manager import ParamManager
+from ..core.result_logger import ResultLogger
+from ..core.param_manager import ParamManager
 class BayesianModel:
     """
     Bayesian model for trading signals using ordered logistic regression
@@ -51,7 +51,7 @@ class BayesianModel:
         self.scaler = StandardScaler()
         
         # Extract model parameters from params
-        self.fee_rate = self.params.get('backtesting', 'fee_rate', default=0.0006)
+        self.fee_rate = self.params.get('exchange', 'fee_rate', default=0.0006)
         self.min_profit = self.params.get('backtesting', 'min_profit_target', default=0.01)
         
         # Feature columns to use for prediction
@@ -1869,7 +1869,7 @@ class BayesianModel:
             results['strategy_return'] = results['long_return'] + results['short_return']
             
             # 12. Add fee impact - fees are proportional to position change
-            fee_rate = 0.0006  # Typical fee of 0.06%
+            fee_rate = self.params.get('exchange', 'fee_rate', default=0.0006)
             results['long_change'] = results['long_position'].diff().abs()
             results['short_change'] = results['short_position'].diff().abs()
             results['fee_impact'] = (results['long_change'] + results['short_change']) * fee_rate
@@ -1916,7 +1916,7 @@ class BayesianModel:
                 metrics['max_short_boost'] = (results['short_prob'] - results['original_short_prob']).max()
             
             # 17. Create visualization using result logger
-            from ..utils.result_logger import ResultLogger
+            from ..core.result_logger import ResultLogger
             result_logger = ResultLogger(getattr(self, 'params', {}))
 
             # Strategy type suffix based on exaggeration

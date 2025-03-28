@@ -27,7 +27,7 @@ from datetime import datetime
 import json
 
 from ..models.model_factory import ModelFactory
-from ..utils.result_logger import ResultLogger
+from ..core.result_logger import ResultLogger
 
 class BacktestEngine:
     """Engine for backtesting trading strategies"""
@@ -43,7 +43,7 @@ class BacktestEngine:
         self.logger = logging.getLogger(__name__)
         # Extract fee rate from config or use default value
         # Extract fee rate and thresholds from params
-        self.fee_rate = self.params.get('backtesting', 'fee_rate', default=0.0006)
+        self.fee_rate = self.params.get('exchange', 'fee_rate', default=0.0006)
         self.exit_threshold = self.params.get('backtesting', 'exit_threshold', default=0.03)
         
         # Create result logger instance for consistent output
@@ -709,7 +709,7 @@ class BacktestEngine:
             
             # Save summary
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            model_type = self.params.get('model', 'model_type')
+            model_type = self.params.get('model', 'type')
             output_dir = Path(f"data/backtest_results/{symbol}/{timeframe}/{model_type}/summary")
             output_dir.mkdir(parents=True, exist_ok=True)
             

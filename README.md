@@ -125,12 +125,15 @@ data:
 
 # Backtesting Parameters
 backtesting:
-  fee_rate: 0.0006  # Per-side fee rate
   min_profit_target: 0.008  # Minimum profit threshold
 
 # Model Selection
 model:
   type: "bayesian"  # Options: "bayesian", "enhanced_bayesian"
+
+# Exchange Configuration
+exchange:
+  fee_rate: 0.0006  # Per-side fee rate
 
 ```
 
@@ -143,13 +146,9 @@ BINANCE_API_KEY=your_api_key
 BINANCE_API_SECRET=your_secret_key
 BINANCE_TESTNET=true
 
-# Data Configuration
-SYMBOLS=BTC/USDT ETH/USDT
-TIMEFRAMES=1h 4h
-EXCHANGE=binance
-
-# Model Parameters
-MODEL_TYPE=enhanced_bayesian
+# Hardware Configuration
+MAX_MEMORY=8000
+CHUNK_SIZE=50000
 ```
 
 5. Templates with common parameters
@@ -191,7 +190,12 @@ Tests model robustness across different assets and timeframes.
 ```
 quantumtrader/
 ├── config/               # Configuration files
-│   └── templates/        # Template files
+│   ├── templates/        # Template files
+│   ├── model/            # Model-specific configuration
+│   ├── strategy/         # Strategy-specific configuration
+│   ├── timeframe/        # Timeframe-specific configuration
+│   ├── symbol/           # Symbol-specific configuration
+│   └── environment/      # Environment-specific configuration
 ├── data/                 # Data storage
 │   ├── raw/              # Original data from exchanges
 │   ├── processed/        # Feature-engineered data
@@ -242,7 +246,7 @@ Choose between different model implementations:
 
 ```bash
 # Set model type via command line
-./launch.sh train --symbols "BTC/USDT" --timeframes "1h" --model-type enhanced_bayesian
+./launch.sh train --symbols "BTC/USDT" --timeframes "1h" --model enhanced_bayesian
 
 # Set in config.yaml, your_template.yaml or environment variable
 export MODEL_TYPE=enhanced_bayesian
@@ -288,7 +292,7 @@ from src.utils.param_manager import ParamManager
 params = ParamManager.get_instance()
 
 # Access parameters with defaults
-fee_rate = params.get('backtesting', 'fee_rate', default=0.0006)
+fee_rate = params.get('exchange', 'fee_rate', default=0.0006)
 symbols = params.get('data', 'symbols')
 
 # Access with type conversion

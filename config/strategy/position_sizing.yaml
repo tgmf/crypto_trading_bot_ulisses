@@ -1,0 +1,9 @@
+# Position sizing strategy configuration
+strategy:
+  type: 'position_sizing'
+
+# Backtesting Settings
+backtesting:
+  min_position_change: 0.0382
+  exaggerate: True
+  compound: True

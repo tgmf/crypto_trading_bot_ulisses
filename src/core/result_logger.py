@@ -27,7 +27,7 @@ from pathlib import Path
 from datetime import datetime
 import json
 import traceback
-from ..utils.param_manager import ParamManager
+from . import ParamManager
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +45,7 @@ class ResultLogger:
         self.logger = logging.getLogger(__name__)
         
         # Extract defaults from param manager
-        self.fee_rate = self.params.get('backtesting','fee_rate', default=0.0006)
+        self.fee_rate = self.params.get('exchange','fee_rate', default=0.0006)
         self.output_dir = Path(params.get('backtesting', 'results', 'path', default='data/backtest_results'))
         
         # Create output directory if it doesn't exist

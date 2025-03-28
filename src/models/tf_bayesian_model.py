@@ -70,7 +70,7 @@ class TFBayesianModel:
         self.scaler = StandardScaler()
         
         # Extract model parameters from params
-        self.fee_rate = self.params.get('backtesting', 'fee_rate', default=0.0006)
+        self.fee_rate = self.params.get('exchange', 'fee_rate', default=0.0006)
         self.min_profit = self.params.get('backtesting', 'min_profit_target', defulat=0.008)
         
         # Feature columns to use for prediction
@@ -1327,7 +1327,7 @@ class TFBayesianModel:
                 return None, None, None
             
             # Get fee rate from config
-            fee_rate = self.params.get('backtesting', 'fee_rate', deafult=0.0006)
+            fee_rate = self.params.get('exchange', 'fee_rate', deafult=0.0006)
             
             # Initialize position sizer
             position_sizer = QuantumPositionSizer(
@@ -1337,7 +1337,7 @@ class TFBayesianModel:
                 volatility_scaling=False,
                 max_position=1.0,
                 min_position_change=min_position_change,
-                initial_capital=10000.0
+                initial_capital=1000.0
             )
             
             self.logger.info(f"Running quantum position sizing backtest with no_trade_threshold={no_trade_threshold}")

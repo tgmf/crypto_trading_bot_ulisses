@@ -19,18 +19,6 @@ data:
 # Model Settings
 model:
   type: 'enhanced_bayesian'
-  max_samples_per_batch: 100000
-  feature_cols:
-    - bb_pos
-    - RSI_14
-    - MACDh_12_26_9
-    - trend_strength
-    - volatility
-    - volume_ratio
-    - range
-    - macd_hist_diff
-    - rsi_diff
-    - bb_squeeze
   path: models
 
 # Strategy Settings
@@ -42,8 +30,8 @@ strategy:
 training:
   memory_efficient: True
   test_size: 0.05     # Small test size
-  max_memory_mb: 16000  # 8GB memory limit
-  min_profit_target: 0.1 # Minimum profit target
+  max_memory_mb: 16000  # Memory limit
+  min_profit_target: 0.05 # Minimum profit target
 
   incremental_training:
     chunk_size: 100000
@@ -55,7 +43,6 @@ backtesting:
   exit_threshold: 0.03
   stop_loss: 0.03
   initial_balance: 1
-  fee_rate: 0.006
   min_position_change: 0.0382
   exaggerate: False
   test_sets:
@@ -77,3 +64,6 @@ walk_forward:
   test_window: 30    # Testing window in ticks
   step_size: 30      # Step size in ticks
   min_train_samples: 1000  # Minimum samples needed for training
+
+exchange:
+  fee_rate: 0.006

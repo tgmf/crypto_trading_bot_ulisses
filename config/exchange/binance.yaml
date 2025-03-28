@@ -1,0 +1,5 @@
+# Binance exchange configuration
+exchange:
+  name: 'binance'
+  fee_rate: 0.006
+  testnet: True

@@ -1,0 +1,9 @@
+# Quantum strategy configuration
+strategy:
+  type: 'quantum'
+
+# Backtesting Settings
+backtesting:
+  exit_threshold: 0.03
+  stop_loss: 0.03
+  initial_balance: 1

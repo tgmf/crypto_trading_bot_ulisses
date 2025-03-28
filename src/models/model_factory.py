@@ -8,7 +8,7 @@ import numpy as np
 
 from .. import JAX_AVAILABLE
 from ..utils.jax_config import benchmark_jax
-from ..utils.param_manager import ParamManager
+from ..core.param_manager import ParamManager
 
 # Check for available backends
 jax_spec = importlib.util.find_spec("jax")

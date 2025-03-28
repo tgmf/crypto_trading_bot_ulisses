@@ -38,7 +38,7 @@ def setup_logging():
 logger = setup_logging()
 
 # Import ParamManager after logging is configured
-from src.utils.param_manager import ParamManager
+from src.core.param_manager import ParamManager
 from src.data.data_collector import DataCollector
 from src.features.feature_engineering import FeatureEngineer
 from src.models.model_factory import ModelFactory
@@ -63,9 +63,9 @@ def parse_args():
                         help='Specific symbols to process (e.g., BTC/USD ETH/USDT)')
     parser.add_argument('--timeframes', type=str, nargs='+',
                         help='Specific timeframes to process (e.g., 1h 4h 1d)')
-    parser.add_argument('--exchange', type=str,
-                        help='Specific exchange to use')
-    parser.add_argument('--model-type', type=str,
+    parser.add_argument('--exchanges', type=str,
+                        help='Specific exchanges to use')
+    parser.add_argument('--model', type=str,
                         choices=['bayesian', 'tf_bayesian', 'enhanced_bayesian', 'quantum'],
                         help='Specify model type to use')
     parser.add_argument('--template', type=str,
@@ -133,10 +133,10 @@ def main():
     timeframes = params.get('data', 'timeframes') # Get timeframes from config
     exchanges = params.get('data', 'exchanges')  # Ger exchanges from config TODO: Support multiple exchanges
     # Add after initializing params in main.py
-    if args.model_type:
-        logger.info(f"CLI argument model_type={args.model_type}")
+    if args.model:
+        logger.info(f"CLI argument model={args.model}")
         # Log how it's stored in ParamManager
-        params.set(args.model_type, 'model', 'type')  # Override the config value
+        params.set(args.model, 'model', 'type')  # Override the config value
         
     # Execute based on command
     if command == 'collect-data':

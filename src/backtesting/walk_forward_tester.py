@@ -29,7 +29,7 @@ class WalkForwardTester:
         """Initialize with parameters manager"""
         self.params = params
         self.logger = logging.getLogger(__name__)
-        self.fee_rate = self.params.get('backtesting', 'fee_rate', default=0.0006)
+        self.fee_rate = self.params.get('exchange', 'fee_rate', default=0.0006)
         
         # Configuration for walk-forward testing
         self.wf_config = self.params.get('walk_forward', default={})
@@ -546,19 +546,20 @@ class WalkForwardTester:
         
         return all_results
     
-    def _create_multi_summary(self, all_results, symbols, timeframes, exchange):
+    def _create_multi_summary(self, all_results):
         """
         Create summary report for multi-symbol walk-forward tests
         
         Args:
             all_results (dict): Results dictionary
-            symbols (list): List of symbols
-            timeframes (list): List of timeframes
-            exchange (str): Exchange name
             
         Returns:
             bool: True if successful, False otherwise
         """
+        exchanges = self.params.get('data', 'exchanges')
+        symbols = self.params.get('data', 'symbols')
+        timeframes = self.params.get('data', 'timeframes')
+        
         try:
             # Collect summary metrics from all tests
             summary_rows = []
@@ -599,7 +600,7 @@ class WalkForwardTester:
             
             # Save to CSV
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            output_dir = Path(f"data/walk_forward_results/{exchange}/summary")
+            output_dir = Path(f"data/walk_forward_results/multi/summary")
             output_dir.mkdir(parents=True, exist_ok=True)
             
             summary_file = output_dir / f"multi_symbol_summary_{timestamp}.csv"

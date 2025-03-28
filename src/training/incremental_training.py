@@ -477,7 +477,7 @@ def main():
     parser = argparse.ArgumentParser(description='Incremental Training Script')
     parser.add_argument('--symbols', type=str, required=True, help='Trading pair symbol')
     parser.add_argument('--timeframes', type=str, required=True, help='Data timeframe')
-    parser.add_argument('--exchange', type=str, default='binance', help='Exchange name')
+    parser.add_argument('--exchanges', type=str, default='binance', help='Exchange name')
     parser.add_argument('--model', type=str, required=True, 
                         choices=['bayesian', 'tf_bayesian', 'enhanced_bayesian', 'jax_bayesian', 'quantum'], 
                         help='Model type')
@@ -503,15 +503,16 @@ def main():
     # Import ParamManager
     # This is imported here to avoid circular imports when called from main.py
     try:
-        from ..utils.param_manager import ParamManager
+        from ..core.param_manager import ParamManager
     except ImportError:
         # When running standalone, use direct import
         sys.path.append(str(Path(__file__).resolve().parents[2]))
-        from src.utils.param_manager import ParamManager
+        from src.core.param_manager import ParamManager
     
-    # Handle multiple symbols and timeframes
+    # Handle multiple symbols, timeframes and exchanges
     symbols = args.symbols.split()
     timeframes = args.timeframes.split()
+    exchanges = args.exchanges.split()
     
     for symbol in symbols:
         for timeframe in timeframes:
@@ -524,7 +525,7 @@ def main():
             # Set data parameters
             params.set([symbol], 'data', 'symbols')
             params.set([timeframe], 'data', 'timeframes')
-            params.set(args.exchange, 'data', 'exchanges', 0)
+            params.set([exchanges], 'data', 'exchanges')
             
             # Set model parameters
             params.set(args.model, 'model', 'type')

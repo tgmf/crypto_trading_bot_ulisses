@@ -11,7 +11,7 @@ import numpy as np
 from pathlib import Path
 import pandas_ta as ta
 import traceback
-from ..utils.param_manager import ParamManager
+from ..core.param_manager import ParamManager
 
 class FeatureEngineer:
     """Creates and transforms features for ML models"""

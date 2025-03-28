@@ -24,7 +24,7 @@ show_help() {
   echo "  --comment                     - Optional comment to identify model purpose"
   echo "  --config path/to/config.yaml  - Specify custom config file"
   echo "  --exchange binance            - Specify exchange to use"
-  echo "  --model-type bayesian|tf_bayesian|enhanced_bayesian  - Specify model type to use"
+  echo "  --model bayesian|tf_bayesian|enhanced_bayesian  - Specify model type to use"
   echo "  --symbols 'BTC/USD ETH/USD'   - Specify symbols to process"
   exho "  --template 'template_name'    - Specify template to use over config file"
   echo "  --timeframes '1h 4h'          - Specify timeframes to process"
@@ -43,7 +43,7 @@ show_help() {
   echo "  --walk-forward                - Use walk-forward testing for backtesting"
   echo ""
   echo "Examples:"
-  echo "  ./launch.sh train --timeframes '1h' --model-type bayesian"
+  echo "  ./launch.sh train --timeframes '1h' --model bayesian"
   echo "  ./launch.sh train --symbols 'ETH/USDT' --timeframes '1m' --cv"
   echo "  ./launch.sh train --symbols 'ETH/USDT' --timeframes '1m' --cv --comment 'rocket fuel'"
   echo "  ./launch.sh train --symbols 'BTC/USD ETH/USDT' --timeframes '1d' --reverse"
@@ -67,7 +67,6 @@ if [ -f .env ]; then
   source .env
 fi
 
-# Near the beginning of the script
 if [ "$DEBUG" = "true" ]; then
   echo "Environment variables loaded:"
   env | grep -E 'BINANCE|KRAKEN|KUCOIN|SYMBOLS|TIMEFRAMES|MODEL'
