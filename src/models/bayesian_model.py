@@ -50,10 +50,6 @@ class BayesianModel:
         self.trace = None
         self.scaler = StandardScaler()
         
-        # Extract model parameters from params
-        self.fee_rate = self.params.get('exchange', 'fee_rate', default=0.0006)
-        self.min_profit = self.params.get('backtesting', 'min_profit_target', default=0.01)
-        
         # Feature columns to use for prediction
         self.feature_cols = self.params.get('model', 'feature_cols', default=[
             'bb_pos', 'RSI_14', 'MACDh_12_26_9', 'trend_strength', 
@@ -85,8 +81,12 @@ class BayesianModel:
         n_samples = len(df)
         targets = np.zeros(n_samples)
         
+        # Extract model parameters from params
+        min_profit = self.params.get('backtesting', 'min_profit_target', default=0.01)
+        fee_rate = self.params.get('exchange', 'fee_rate', default=0.0006)
+        
         # Calculate total fee cost for round trip (entry + exit)
-        fee_cost = self.fee_rate * 2
+        fee_cost = fee_rate * 2
         
         # For each point in time, look forward to find profitable trades
         for i in range(n_samples - forward_window):
@@ -102,9 +102,9 @@ class BayesianModel:
             max_short_return = np.max(short_returns) if len(short_returns) > 0 else -np.inf
             
             # Determine the optimal trade direction
-            if max_long_return >= self.min_profit and max_long_return > max_short_return:
+            if max_long_return >= min_profit and max_long_return > max_short_return:
                 targets[i] = 1  # Long opportunity
-            elif max_short_return >= self.min_profit and max_short_return > max_long_return:
+            elif max_short_return >= min_profit and max_short_return > max_long_return:
                 targets[i] = -1  # Short opportunity
             else:
                 targets[i] = 0  # No trade opportunity
@@ -665,7 +665,7 @@ class BayesianModel:
             self.logger.error(traceback.format_exc())
             return False
 
-    def save_model(self, suffix=None):
+    def save_model(self, save_path=None, suffix=None):
         """
         Save the trained model to disk
         
@@ -673,6 +673,7 @@ class BayesianModel:
         models/{symbol_safe}/{timeframe}/{model_type}/{datetime}_{comment}_{suffix}.{ext}
         
         Args:
+            save_path (str, optional): Optional path to save the model to.
             suffix (str, optional): Additional identifier for special versions
             
         Returns:
@@ -700,7 +701,7 @@ class BayesianModel:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             
             # Create base directory structure
-            model_dir = Path(f"models/{symbol_safe}/{timeframe}/{model_type}")
+            model_dir = Path(f"models/{symbol_safe}/{timeframe}/{model_type}") # TODO: get path from param
             model_dir.mkdir(parents=True, exist_ok=True)
             
             # Create base filename with optional elements
@@ -762,7 +763,7 @@ class BayesianModel:
             
             # Remove existing symlinks if they exist
             for path in [version_scaler, version_trace, version_feat_cols, version_metrics]:
-                if path.exists():
+                if path.exists() or path.is_symlink():
                     path.unlink()
             
             # Create new symlinks
@@ -774,22 +775,26 @@ class BayesianModel:
             # Verify symlinks
             if not version_scaler.exists() or version_scaler.stat().st_size == 0:
                 self.logger.warning(f"Symlink verification failed for {version_scaler}. Attempting absolute path.")
-                version_scaler.unlink()
+                if version_scaler.exists() or version_scaler.is_symlink():
+                    version_scaler.unlink()
                 version_scaler.symlink_to(scaler_path.absolute())
                 
             if not version_trace.exists() or version_trace.stat().st_size == 0:
                 self.logger.warning(f"Symlink verification failed for {version_trace}. Attempting absolute path.")
-                version_trace.unlink()
+                if version_trace.exists() or version_trace.is_symlink():
+                    version_trace.unlink()
                 version_trace.symlink_to(trace_path.absolute())
                 
             if not version_feat_cols.exists() or version_feat_cols.stat().st_size == 0:
                 self.logger.warning(f"Symlink verification failed for {version_feat_cols}. Attempting absolute path.")
-                version_feat_cols.unlink()
+                if version_feat_cols.exists() or version_feat_cols.is_symlink():
+                    version_feat_cols.unlink()
                 version_feat_cols.symlink_to(feat_cols_path.absolute())
                 
             if not version_metrics.exists() or version_metrics.stat().st_size == 0:
                 self.logger.warning(f"Symlink verification failed for {version_metrics}. Attempting absolute path.")
-                version_metrics.unlink()
+                if version_metrics.exists() or version_metrics.is_symlink():
+                    version_metrics.unlink()
                 version_metrics.symlink_to(metrics_path.absolute())
                 
             # Final verification
@@ -1603,47 +1608,6 @@ class BayesianModel:
         # Train on weighted sample
         params.set(sampled_df, 'custom_df')
         return self.train()
-    
-    def _configure_jax_acceleration(self):
-        """Configure JAX acceleration settings if available"""
-        # Check for acceleration capabilities
-        jax_available = self.params.get('model', 'jax_available', default=False)
-        use_jax = self.params.get('model', 'use_jax', default=False)
-        
-        # Only attempt JAX acceleration if both available and enabled
-        if jax_available and use_jax:
-            try:
-                import pytensor
-                
-                # Configure PyTensor for JAX
-                pytensor.config.compute_test_value = "off"
-                
-                # Get JAX precision parameter
-                jax_precision = self.params.get('model', 'jax_precision', default='float32')
-                pytensor.config.floatX = jax_precision
-            
-                # Advanced JAX configurations
-                jax_opt_level = self.params.get('model', 'jax_opt_level', default=None)
-                if jax_opt_level is not None:
-                    pytensor.config.optimizer = jax_opt_level
-                
-                # Memory optimization for JAX if requested
-                if self.params.get('model', 'jax_memory_efficient', default=False):
-                    pytensor.config.gcc__cxxflags = "-fno-inline"
-                
-                # JAX XLA compilation flags
-                if self.params.get('model', 'jax_xla_debug', default=False):
-                    import os
-                    os.environ['XLA_FLAGS'] = '--xla_dump_to=/tmp/xla_dumps'
-                
-                self.logger.info(f"JAX acceleration configured with precision {jax_precision}")
-                self.using_jax_acceleration = True
-                
-            except Exception as e:
-                self.logger.warning(f"Failed to configure JAX: {e}, continuing without acceleration")
-                self.using_jax_acceleration = False
-                
-    
         
     def run_backtest_with_position_sizing(self, df, no_trade_threshold=0.96, 
                                             min_position_change=0.025, compound_returns=True, exaggerate=True):

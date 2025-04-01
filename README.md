@@ -95,7 +95,7 @@ The project includes a convenience script for common operations:
 
 ## 📝 Configuration
 
-Key settings in `config/config.yaml`:
+Key settings in `config/base.yaml`:
 
 The system uses a centralized parameter management approach with ParamManager, which provides:
 

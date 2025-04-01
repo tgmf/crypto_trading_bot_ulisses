@@ -45,6 +45,7 @@ from src.models.model_factory import ModelFactory
 from src.backtesting.backtest_engine import BacktestEngine
 from src.backtesting.walk_forward_tester import WalkForwardTester
 from src.training.incremental_training import train_incrementally
+from src.utils.jax_config import get_jax_config, configure_jax
 
 def parse_args():
     """Parse command-line arguments"""
@@ -57,7 +58,7 @@ def parse_args():
                         help='Command to execute')
     
     # Common parameters
-    parser.add_argument('--config', type=str, default='config/config.yaml',
+    parser.add_argument('--config', type=str, default='config/base.yaml',
                         help='Path to configuration file')
     parser.add_argument('--symbols', type=str, nargs='+',
                         help='Specific symbols to process (e.g., BTC/USD ETH/USDT)')
@@ -114,10 +115,29 @@ def main():
     
     # Initialize parameter manager with all sources
     params = ParamManager.get_instance(
-        config_path=args.config,
+        base_config_path=args.config,
         cli_args=args,
         env_vars=True
     )
+    
+    # Configure JAX once at startup and store in params
+    jax_config = get_jax_config() or configure_jax()
+    if jax_config:
+        logger.info(f"Configuring JAX acceleration: {jax_config['acceleration_type']}")
+        params.set(jax_config['jax_available'], 'model', 'jax_available')
+        params.set(jax_config['acceleration_type'], 'model', 'acceleration_type')
+        params.set(jax_config['performance_score'], 'model', 'jax_performance')
+        params.set(jax_config['jax_available'], 'model', 'use_jax')  # Default to using JAX if available
+        
+        # Log detailed JAX information
+        if jax_config['devices']:
+            logger.info(f"JAX devices: {jax_config['devices']}")
+        if jax_config['performance_score']:
+            logger.info(f"JAX benchmark score: {jax_config['performance_score']:.4f}s")
+    else:
+        logger.warning("JAX acceleration not available")
+        params.set(False, 'model', 'jax_available')
+        params.set('CPU-Only', 'model', 'acceleration_type')
     
     # Load template if specified
     if args.template:
@@ -132,6 +152,7 @@ def main():
     symbols = params.get('data', 'symbols') # Get symbols from config
     timeframes = params.get('data', 'timeframes') # Get timeframes from config
     exchanges = params.get('data', 'exchanges')  # Ger exchanges from config TODO: Support multiple exchanges
+    
     # Add after initializing params in main.py
     if args.model:
         logger.info(f"CLI argument model={args.model}")

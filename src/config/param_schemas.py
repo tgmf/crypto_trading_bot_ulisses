@@ -54,18 +54,53 @@ def get_parameter_schemas() -> SchemaRegistry:
         # Model parameters
         ('model', 'type'): {
             'type': 'string',
-            'allowed_values': ['bayesian', 'enhanced_bayesian', 'tf_bayesian'],
             'description': 'Type of prediction model to use'
         },
         ('model', 'path'): {
             'type': 'string',
             'description': 'Path to store trained models'
         },
-        
+        ('model', 'comment'): {
+            'type': 'string',
+            'description': 'Comment to include with saved model'
+        },
+        ('model', 'version'): {
+            'type': 'string',
+            'description': 'Version identifier for model'
+        },
+        ('model', 'suffix'): {
+            'type': 'string',
+            'description': 'Suffix to append to model filenames'
+        },
+        # Acceleration parameters
+        ('model', 'jax_available'): {
+            'type': 'boolean',
+            'description': 'Whether JAX acceleration is available'
+        },
+        ('model', 'acceleration_type'): {
+            'type': 'string',
+            'description': 'Type of hardware acceleration available'
+        },
+        ('model', 'jax_performance'): {
+            'type': 'float',
+            'description': 'JAX performance benchmark score in seconds'
+        },
+        ('model', 'use_jax'): {
+            'type': 'boolean',
+            'description': 'Whether to use JAX acceleration when available'
+        },
+        ('model', 'jax_precision'): {
+            'type': 'string',
+            'allowed_values': ['float32', 'float64'],
+            'description': 'Floating-point precision for JAX operations'
+        },
+        ('model', 'jax_memory_efficient'): {
+            'type': 'boolean',
+            'description': 'Whether to use memory-efficient settings for JAX'
+        },
         # Strategy parameters
         ('strategy', 'type'): {
             'type': 'string',
-            'allowed_values': ['quantum', 'mean_reversion', 'trend_following'],
             'description': 'Trading strategy to use'
         },
         ('strategy', 'path'): {
@@ -81,7 +116,7 @@ def get_parameter_schemas() -> SchemaRegistry:
         ('training', 'test_size'): {
             'type': 'float',
             'min': 0.01,
-            'max': 0.5,
+            'max': 0.95,
             'description': 'Fraction of data to use for testing'
         },
         ('training', 'max_memory_mb'): {

@@ -15,8 +15,8 @@ JAX_AVAILABLE = jax_spec is not None
 if JAX_AVAILABLE:
     try:
         from .utils.jax_config import configure_jax
-        configure_jax()
-        logger.info("JAX configured at startup")
+        jax_config = configure_jax()
+        logger.info(f"JAX configured at startup with acceleration type: {jax_config['acceleration_type']}")
     except Exception as e:
         logger.warning(f"Failed to configure JAX: {e}")
         JAX_AVAILABLE = False

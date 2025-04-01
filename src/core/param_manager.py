@@ -12,7 +12,7 @@ from pathlib import Path
 import copy
 import re
 from datetime import datetime
-from ..config.parameter_schemas import get_schema_for_parameter
+from ..config.param_schemas import get_schema_for_parameter
 
 class ParamManager:
     """
@@ -85,7 +85,7 @@ class ParamManager:
     
         # 2. Load environment-specific config based on ENVIRONMENT env var
         environment = os.getenv('ENVIRONMENT', 'development')
-        env_config = f"config/environments/{environment}.yaml"
+        env_config = f"config/environment/{environment}.yaml"
         self._load_from_config(env_config)
         
         # 3. Load modular configurations based on CLI arguments
@@ -166,8 +166,7 @@ class ParamManager:
             module_name = module_dir.name  # e.g., 'models', 'strategies'
             
             # Skip environments directory - handled separately in __init__
-            if module_name == 'environments':
-                self.logger.warning("Really bad idea to change environment in cli, skipping that sht")
+            if module_name == 'environment':
                 continue
             
             # Convert module directory name to likely CLI argument name

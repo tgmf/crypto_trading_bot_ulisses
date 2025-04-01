@@ -4,6 +4,6 @@ strategy:
 
 # Backtesting Settings
 backtesting:
-  min_position_change: 0.0382
+  min_position_change: 0.382
   exaggerate: True
   compound: True
