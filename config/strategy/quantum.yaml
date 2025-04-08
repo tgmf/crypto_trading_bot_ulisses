@@ -4,6 +4,6 @@ strategy:
 
 # Backtesting Settings
 backtesting:
-  exit_threshold: 0.03
-  stop_loss: 0.03
+  exit_threshold: 0.3
+  stop_loss: 0.1
   initial_balance: 1

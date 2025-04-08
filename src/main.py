@@ -121,19 +121,18 @@ def main():
     )
     
     # Configure JAX once at startup and store in params
-    jax_config = get_jax_config() or configure_jax()
+    jax_config = get_jax_config()
+    if jax_config is None:
+        logger.info("JAX not yet configured, configuring now...")
+        jax_config = configure_jax()
+    else:
+        logger.info("Using previously configured JAX settings")
+    
     if jax_config:
-        logger.info(f"Configuring JAX acceleration: {jax_config['acceleration_type']}")
         params.set(jax_config['jax_available'], 'model', 'jax_available')
         params.set(jax_config['acceleration_type'], 'model', 'acceleration_type')
         params.set(jax_config['performance_score'], 'model', 'jax_performance')
         params.set(jax_config['jax_available'], 'model', 'use_jax')  # Default to using JAX if available
-        
-        # Log detailed JAX information
-        if jax_config['devices']:
-            logger.info(f"JAX devices: {jax_config['devices']}")
-        if jax_config['performance_score']:
-            logger.info(f"JAX benchmark score: {jax_config['performance_score']:.4f}s")
     else:
         logger.warning("JAX acceleration not available")
         params.set(False, 'model', 'jax_available')

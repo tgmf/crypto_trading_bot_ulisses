@@ -9,6 +9,8 @@ from pathlib import Path
 # Setup logging
 logger = logging.getLogger(__name__)
 
+_JAX_CONFIG_CACHE = None
+
 def is_wsl():
     """Check if running in WSL."""
     if os.path.exists('/proc/version'):
@@ -28,14 +30,25 @@ def configure_jax():
     Returns:
         dict: Configuration information and status
     """
+    
+    global _JAX_CONFIG_CACHE
+    
+    # If already configured, return cached config
+    if _JAX_CONFIG_CACHE is not None:
+        logger.info("Using cached JAX configuration")
+        return _JAX_CONFIG_CACHE
+    
     config_info = {
         'jax_available': False,
         'acceleration_type': 'CPU-Only',
-        'performance_score': None,
+        'performance_score': float('inf'),
         'multiprocessing_method': None,
         'devices': [],
         'pytensor_config': {}  # Store PyTensor settings here
     }
+    
+    # Add debug info
+    logger.info("Starting JAX configuration")
     
     # Set multiprocessing start method to 'spawn' to avoid JAX fork issues
     if hasattr(multiprocessing, 'get_start_method'):
@@ -53,9 +66,12 @@ def configure_jax():
     try:
         import jax
         import jax.numpy as jnp
-        from jax.config import config
+        from jax import config
         
         config_info['jax_available'] = True
+    
+        # Log JAX backend details
+        logger.info(f"JAX backend: {config.x64_enabled}")
         
         # Set JAX to use 32-bit precision by default
         os.environ['JAX_ENABLE_X64'] = '0'
@@ -70,33 +86,48 @@ def configure_jax():
             
             # Enable auto hardware selection 
             os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'  # Reduce TF logging noise
+            
+            # For Intel GPU optimization
+            os.environ['DNNL_PRIMITIVE_CACHE_CAPACITY'] = '1024'  # Larger cache for Intel MKL-DNN
+            os.environ['OMP_NUM_THREADS'] = str(multiprocessing.cpu_count())  # Use all CPU cores
+        try:
+            # Run quick performance benchmark with more monitoring
+            logger.info("Starting JAX performance benchmark...")
+            # Run quick performance benchmark
+            size = 2000  # Smaller size for quick test
+            key = jax.random.PRNGKey(42)
+            
+            # Generate a random normal distribution matrix
+            x = jax.random.normal(key, (size, size), dtype=jnp.float32)
         
-        # Run quick performance benchmark
-        size = 2000  # Smaller size for quick test
-        key = jax.random.PRNGKey(42)
-        x = jax.random.normal(key, (size, size), dtype=jnp.float32)
+            # Warmup run to ensure JAX is ready
+            _ = jnp.dot(x, x.T).block_until_ready()
+            
+            # Timed run
+            start = time.time()
+            result = jnp.dot(x, x.T)
+            result.block_until_ready()
+            elapsed = time.time() - start
+            logger.info(f"Benchmark completed in {elapsed:.3f}s")
+            
+            config_info['performance_score'] = elapsed
         
-        # Warmup
-        _ = jnp.dot(x, x.T).block_until_ready()
-        
-        # Timed run
-        start = time.time()
-        result = jnp.dot(x, x.T)
-        result.block_until_ready()
-        elapsed = time.time() - start
-        
-        config_info['performance_score'] = elapsed
-        
-        # Determine acceleration type
-        if elapsed < 1.0:
-            config_info['acceleration_type'] = 'JAX-GPU'
-            logger.info(f"JAX GPU acceleration detected (benchmark: {elapsed:.3f}s)")
-        elif elapsed < 3.0:
-            config_info['acceleration_type'] = 'JAX-Accelerated'
-            logger.info(f"JAX acceleration detected (benchmark: {elapsed:.3f}s)")
-        else:
-            config_info['acceleration_type'] = 'JAX-CPU'
-            logger.info(f"JAX CPU mode detected (benchmark: {elapsed:.3f}s)")
+            # Determine acceleration type
+            if elapsed < 0.05:
+                config_info['acceleration_type'] = 'JAX-GPU'
+                logger.info(f"JAX GPU acceleration detected (benchmark: {elapsed:.3f}s)")
+            elif elapsed < 0.2:
+                config_info['acceleration_type'] = 'JAX-Accelerated'
+                logger.info(f"JAX acceleration detected (benchmark: {elapsed:.3f}s)")
+            else:
+                config_info['acceleration_type'] = 'JAX-CPU'
+                logger.info(f"JAX CPU mode detected (benchmark: {elapsed:.3f}s)")
+                
+        except Exception as bench_e:
+            logger.error(f"JAX benchmark failed: {bench_e}", exc_info=True)
+            # Still mark JAX as available but with no acceleration
+            config_info['acceleration_type'] = 'JAX-CPU-NoBench'
+            config_info['performance_score'] = float('inf')
         
         # Log device information
         devices = jax.devices()
@@ -111,25 +142,27 @@ def configure_jax():
         }
         
         # Store JAX configuration globally for access by models
-        global _JAX_CONFIG
-        _JAX_CONFIG = config_info
+        _JAX_CONFIG_CACHE = config_info
         
         return config_info
     
     except ImportError:
         logger.warning("JAX not available")
+        config_info['jax_available'] = False
+        config_info['acceleration_type'] = 'CPU-Only'
+        config_info['performance_score'] = float('inf')
         return config_info
     except Exception as e:
         logger.warning(f"Error configuring JAX: {e}")
+        config_info['jax_available'] = False
+        config_info['acceleration_type'] = 'CPU-Only'
+        config_info['performance_score'] = float('inf') 
         return config_info
-    
-# Global variable to store JAX configuration
-_JAX_CONFIG = None
 
 def get_jax_config():
     """Get the current JAX configuration."""
-    global _JAX_CONFIG
-    return _JAX_CONFIG
+    global _JAX_CONFIG_CACHE
+    return _JAX_CONFIG_CACHE
 
 def setup_model_pytensor(params):
     """

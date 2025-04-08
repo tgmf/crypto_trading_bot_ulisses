@@ -44,7 +44,7 @@ class BacktestEngine:
         # Extract fee rate from config or use default value
         # Extract fee rate and thresholds from params
         self.fee_rate = self.params.get('exchange', 'fee_rate', default=0.0006)
-        self.exit_threshold = self.params.get('backtesting', 'exit_threshold', default=0.03)
+        self.exit_threshold = self.params.get('backtesting', 'exit_threshold', default=0.3)
         
         # Create result logger instance for consistent output
         self.result_logger = ResultLogger(params)
@@ -70,14 +70,15 @@ class BacktestEngine:
         symbol = params.get('data', 'symbols', 0)
         timeframe = params.get('data', 'timeframes', 0)
         strategy = params.get('strategy', 'type', default='quantum')
+        test_sets_path = self.params.get('backtesting', 'test_sets', 'path', default='data/test_sets')
+        processed_path = self.params.get('data', 'processed', 'path', default='data/processed')
         
         self.logger.info(f"Running backtest for {exchange} {symbol} {timeframe}")
         
         try:
             # Check for test data first
             symbol_safe = symbol.replace('/', '_')
-            #TODO: test_sets_path should be a param
-            test_file = Path(f"data/test_sets/{exchange}/{symbol_safe}/{timeframe}_test.csv")
+            test_file = Path(f"{test_sets_path}/{exchange}/{symbol_safe}/{timeframe}_test.csv")
             
             # If test data exists, use it (preferred for proper evaluation)
             if test_file.exists():
@@ -89,8 +90,7 @@ class BacktestEngine:
                 self.logger.warning(f"No test set found at {test_file}. Using processed data instead. "
                         f"This may lead to overoptimistic results due to possible data leakage.")
                 
-                #TODO: processed data path should be a param
-                input_file = Path(f"data/processed/{exchange}/{symbol_safe}/{timeframe}.csv")
+                input_file = Path(f"{processed_path}/{exchange}/{symbol_safe}/{timeframe}.csv")
                 
                 if not input_file.exists():
                     self.logger.error(f"No processed data file found at {input_file}")
@@ -135,7 +135,7 @@ class BacktestEngine:
             self.logger.error(traceback.format_exc())
             return False
     
-    def _run_quantum_backtest(self, df, probabilities, threshold=0.05, hedge_threshold=0.03):
+    def _run_quantum_backtest(self, df, probabilities, threshold=0.5, hedge_threshold=0.48):
         """
         Run backtest with quantum-inspired trading approach
         
@@ -151,8 +151,8 @@ class BacktestEngine:
         Args:
             df (DataFrame): Price data DataFrame with OHLCV data
             probabilities (ndarray): Probability array [P(short), P(no_trade), P(long)]
-            threshold (float): Minimum probability to enter a position (default: 0.05)
-            hedge_threshold (float): Threshold for considering hedging (default: 0.03)
+            threshold (float): Minimum probability to enter a position (default: 0.2)
+            hedge_threshold (float): Threshold for considering hedging (default: 0.4)
             
         Returns:
             tuple: (df_backtest, metrics) - DataFrame with backtest results and performance statistics

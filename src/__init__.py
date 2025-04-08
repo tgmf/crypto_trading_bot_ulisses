@@ -3,8 +3,10 @@
 # Check for available backends
 import importlib.util
 import logging
+import sys
 
 # Set up module-level logger
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Check for JAX availability

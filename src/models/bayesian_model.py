@@ -26,6 +26,8 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 from ..core.result_logger import ResultLogger
 from ..core.param_manager import ParamManager
+from ..data.data_context import DataContext
+
 class BayesianModel:
     """
     Bayesian model for trading signals using ordered logistic regression
@@ -49,6 +51,7 @@ class BayesianModel:
         self.model = None
         self.trace = None
         self.scaler = StandardScaler()
+        self.data_context_metadata = None 
         
         # Feature columns to use for prediction
         self.feature_cols = self.params.get('model', 'feature_cols', default=[
@@ -56,10 +59,6 @@ class BayesianModel:
             'volatility', 'volume_ratio', 'range', 'macd_hist_diff', 
             'rsi_diff', 'bb_squeeze'
         ])
-    
-        # Configure JAX acceleration up front
-        self.using_jax_acceleration = False
-        self._configure_jax_acceleration()
     
     def create_target(self, df, forward_window=60):
         """
@@ -203,7 +202,7 @@ class BayesianModel:
         Train the model on processed data with proper train-test split
         
         This implementation:
-        1. Loads the data
+        1. Loads the data using DataContext
         2. Creates chronological train-test split (last 30% for testing by default)
         3. Creates target variables
         4. Saves the test set separately
@@ -224,54 +223,52 @@ class BayesianModel:
         self.logger.info(f"Training model for {exchange} {symbol} {timeframe} with train-test split")
         
         try:
-            # Create a safe version of the symbol for file paths
-            symbol_safe = symbol.replace('/', '_')
+            # Load data using DataContext
+            data_context = DataContext.from_processed_data(self.params, exchange, symbol, timeframe)
+    
+            if data_context is None:
+                self.logger.error(f"Failed to load data for {symbol} {timeframe}")
+                return False
         
-            # Check if custom dataframe is provided via params
-            custom_df = params.get('custom_df', default=None)
+            # Validate the data has required columns
+            if not data_context.validate(required_columns=self.feature_cols + ['open', 'high', 'low', 'close', 'volume']):
+                return False
             
-            # Use custom dataframe if provided, otherwise load from file
-            if custom_df is not None:
-                df = custom_df.copy()
-                self.logger.info(f"Using provided DataFrame with {len(df)} samples")
-            else:
-                # Load processed data TODO: get path from param
-                input_file = Path(f"data/processed/{exchange}/{symbol_safe}/{timeframe}.csv")
-                
-                if not input_file.exists():
-                    self.logger.error(f"No processed data file found at {input_file}")
-                    return False
-                    
-                df = pd.read_csv(input_file, index_col='timestamp', parse_dates=True)
-            
-            # Create target if not already present - must be done before splitting to avoid data leakage 
-            # (target creation uses future data for each point)
-            if 'target' not in df.columns:
+            # Create target if not already present - must be done before splitting to avoid data leakage
+            if 'target' not in data_context.df.columns:
                 self.logger.info("Creating target variables")
-                df['target'] = self.create_target(df)
+                data_context.df['target'] = self.create_target(data_context.df)
+                data_context.add_processing_step("create_target", {"forward_window": 60})
             
             # Drop rows with NaN targets (occurs at the end due to forward window)
-            df = df.dropna(subset=['target'])
+            data_context.df = data_context.df.dropna(subset=['target'])
+            data_context.add_processing_step("dropna", {"subset": ['target']})
 
             # Create train-test split chronologically
-            train_size = int(len(df) * (1 - test_size))
-            train_df = df.iloc[:train_size].copy()
-            test_df = df.iloc[train_size:].copy()
+            splits = data_context.create_time_split(test_size=test_size)
+            train_df = splits['train']
+            test_df = splits['test']
             
             self.logger.info(f"Split data into training ({len(train_df)} samples) and test ({len(test_df)} samples)")
             
             # Save test set for later evaluation if test_size > 0
             if test_size > 0 and len(test_df) > 0:
-                #TODO get path from param
-                test_output_dir = Path(f"data/test_sets/{exchange}/{symbol_safe}")
-                test_output_dir.mkdir(parents=True, exist_ok=True)
+                # Create a new DataContext just for the test set
+                test_context = DataContext(self.params, test_df, exchange, symbol, timeframe, source="test_set")
+                
+                # Create test set directory
+                symbol_safe = symbol.replace('/', '_')
+                test_sets_path = params.get('data', 'test_set', 'path', default="data/test_sets")
+                test_output_path = Path(f"{test_sets_path}/{exchange}/{symbol_safe}")
+                test_output_path.mkdir(parents=True, exist_ok=True)
             
-                test_output_file = test_output_dir / f"{timeframe}_test.csv"
+                test_output_file = test_output_path / f"{timeframe}_test.csv"
                 test_df.to_csv(test_output_file)
+                test_context.add_processing_step("save_test_set", {"path": str(test_output_file)})
                 self.logger.info(f"Saved test set to {test_output_file}")
 
-            # Get max samples per batch from params, default to 50000
-            max_samples_per_batch = self.params.get('model', 'max_samples_per_batch', default=50000)
+            # Get max samples per batch from params, default to 100000
+            max_samples_per_batch = self.params.get('training', 'max_samples_per_batch', default=100000)
             
             # Check if we need to batch process due to dataset size
             if len(train_df) > max_samples_per_batch:
@@ -286,6 +283,13 @@ class BayesianModel:
                     n_samples = min(len(target_df), int(max_samples_per_batch * len(target_df) / len(train_df)))
                     sampled = target_df.sample(n_samples)
                     train_df_sampled = pd.concat([train_df_sampled, sampled])
+        
+                data_context.add_processing_step("stratified_sampling", {
+                    "original_size": len(train_df),
+                    "sampled_size": len(train_df_sampled),
+                    "sampling_method": "stratified",
+                    "target_distribution": {str(v): int((train_df['target'] == v).sum()) for v in train_df['target'].unique()}
+                })
                 
                 self.logger.info(f"Reduced dataset to {len(train_df_sampled)} samples (maintaining class balance)")
                 train_df = train_df_sampled
@@ -296,10 +300,25 @@ class BayesianModel:
             
             # Scale features (fit only on training data to avoid data leakage)
             X_train_scaled = self.scaler.fit_transform(X_train)
+    
+            data_context.add_processing_step("scale_features", {
+                "scaler": "StandardScaler",
+                "feature_cols": self.feature_cols,
+                "fitted_on": "train"
+            })
             
             # Build and train model on training data only
             self.logger.info("Building Bayesian model...")
             self.build_model(X_train_scaled, y_train)
+    
+            # Store DataContext metadata for model reproducibility
+            self.data_context_metadata = {
+                "processing_history": data_context.get_processing_history(),
+                "feature_columns": self.feature_cols,
+                "training_samples": len(train_df),
+                "test_samples": len(test_df) if test_df is not None else 0,
+                "target_distribution": {str(v): int((train_df['target'] == v).sum()) for v in train_df['target'].unique()}
+            }
             
             # Save model
             self.save_model()
@@ -339,40 +358,51 @@ class BayesianModel:
         self.logger.info(f"Training model for {exchange} {symbol} {timeframe} with cross-validation")
         
         try:
-            # Load processed data
-            symbol_safe = symbol.replace('/', '_')
-            #TODO: get path from param
-            input_file = Path(f"data/processed/{exchange}/{symbol_safe}/{timeframe}.csv")
+            # Load data using DataContext
+            data_context = DataContext.from_processed_data(self.params, exchange, symbol, timeframe)
             
-            if not input_file.exists():
-                self.logger.error(f"No processed data file found at {input_file}")
+            if data_context is None:
+                self.logger.error(f"Failed to load data for {symbol} {timeframe}")
                 return False
                 
-            df = pd.read_csv(input_file, index_col='timestamp', parse_dates=True)
+            # Validate the data has required columns
+            if not data_context.validate(required_columns=self.feature_cols + ['open', 'high', 'low', 'close', 'volume']):
+                return False
             
-            # Create target
-            self.logger.info("Creating target variables")
-            df['target'] = self.create_target(df)
+            # Create target if not already present
+            if 'target' not in data_context.df.columns:
+                self.logger.info("Creating target variables")
+                data_context.df['target'] = self.create_target(data_context.df)
+                data_context.add_processing_step("create_target", {"forward_window": 60})
             
-            # Drop rows with NaN targets (likely at the end due to forward window)
-            df = df.dropna(subset=['target'])
+            # Drop rows with NaN targets (occurs at the end due to forward window)
+            data_context.df = data_context.df.dropna(subset=['target'])
+            data_context.add_processing_step("dropna", {"subset": ['target']})
             
-            # 1. First split into train+validation and test sets (chronologically)
-            train_val_size = int(len(df) * (1 - test_size))
-            train_val_df = df.iloc[:train_val_size]
-            test_df = df.iloc[train_val_size:]
+            # First split into train+validation and test sets (chronologically)
+            splits = data_context.create_time_split(test_size=test_size)
+            train_val_df = splits['train']
+            test_df = splits['test']
             
             self.logger.info(f"Reserved {len(test_df)} samples for test set")
             
-            # 2. Save test data for later evaluation
-            test_output_dir = Path(f"data/test_sets/{exchange}/{symbol_safe}")
-            test_output_dir.mkdir(parents=True, exist_ok=True)
+            # Save test data for later evaluation
+            if len(test_df) > 0:
+                # Create a new DataContext just for the test set
+                test_context = DataContext(self.params, test_df, exchange, symbol, timeframe, source="test_set")
+                
+                # Save the test set
+                symbol_safe = symbol.replace('/', '_')
+                test_sets_path = params.get('data', 'test_set', 'path', default="data/test_sets")
+                test_output_path = Path(f"{test_sets_path}/{exchange}/{symbol_safe}")
+                test_output_path.mkdir(parents=True, exist_ok=True)
+                
+                test_output_file = test_output_path / f"{timeframe}_test.csv"
+                test_df.to_csv(test_output_file)
+                test_context.add_processing_step("save_test_set", {"path": str(test_output_file)})
+                self.logger.info(f"Saved test set to {test_output_file}")
             
-            test_output_file = test_output_dir / f"{timeframe}_test.csv"
-            test_df.to_csv(test_output_file)
-            self.logger.info(f"Saved test set to {test_output_file}")
-            
-            # 3. Set up time series cross-validation on train_val set
+            # Set up time series cross-validation on train_val set
             X = train_val_df[self.feature_cols].values
             y = train_val_df['target'].values
             
@@ -388,7 +418,7 @@ class BayesianModel:
             # Time Series Split for cross-validation
             tscv = TimeSeriesSplit(n_splits=n_splits, gap=gap)
             
-            # 4. Perform cross-validation
+            # Perform cross-validation
             self.logger.info(f"Performing {n_splits}-fold time-series cross-validation")
             
             for i, (train_idx, val_idx) in enumerate(tscv.split(X)):
@@ -450,7 +480,7 @@ class BayesianModel:
             
             self.logger.info(f"CV complete. Avg train accuracy: {avg_train_acc:.4f}, Avg val accuracy: {avg_val_acc:.4f}")
             
-            # 5. Final model training on all train_val data
+            # Final model training on all train_val data
             self.logger.info(f"Training final model on all {len(train_val_df)} training+validation samples")
             
             # Prepare all training data
@@ -463,7 +493,18 @@ class BayesianModel:
             # Build and train final model
             self.build_model(X_all_scaled, y_all)
             
-            # 6. Save model
+            # Store DataContext metadata for model reproducibility
+            self.data_context_metadata = {
+                "processing_history": data_context.get_processing_history(),
+                "feature_columns": self.feature_cols,
+                "training_samples": len(train_val_df),
+                "test_samples": len(test_df),
+                "cv_folds": n_splits,
+                "cv_gap": gap,
+                "target_distribution": {str(v): int((train_val_df['target'] == v).sum()) for v in train_val_df['target'].unique()}
+            }
+            
+            # Save model
             self.save_model()
             
             # Plot CV performance
@@ -482,8 +523,7 @@ class BayesianModel:
         Train model with reversed datasets to test consistency and robustness
         
         This method:
-        1. Loads the original train-test split (if available)
-        2. If not, creates a new split and first runs normal training
+        1. Loads the original train-test split usinf DataContext
         3. Reverses the datasets (trains on test, tests on train)
         4. Saves the model with a 'reversed' indicator
         5. Evaluates and compares performance on both approaches
@@ -501,50 +541,62 @@ class BayesianModel:
         self.logger.info(f"Training model with reversed datasets for {exchange} {symbol} {timeframe}")
         
         try:
+            # Load data using DataContext
+            data_context = DataContext.from_processed_data(self.params, exchange, symbol, timeframe)
+            
+            if data_context is None:
+                self.logger.error(f"Failed to load data for {symbol} {timeframe}")
+                return False
+                
+            # Validate the data has required columns
+            if not data_context.validate(required_columns=self.feature_cols + ['open', 'high', 'low', 'close', 'volume']):
+                return False
+            
+            # Create target if not already present
+            if 'target' not in data_context.df.columns:
+                self.logger.info("Creating target variables")
+                data_context.df['target'] = self.create_target(data_context.df)
+                data_context.add_processing_step("create_target", {"forward_window": 60})
+            
+            # Drop rows with NaN targets
+            data_context.df = data_context.df.dropna(subset=['target'])
+            data_context.add_processing_step("dropna", {"subset": ['target']})
+            
             # First, check if we already have a test set
             symbol_safe = symbol.replace('/', '_')
-            test_file = Path(f"data/test_sets/{exchange}/{symbol_safe}/{timeframe}_test.csv")
+            test_sets_path = params.get('data', 'test_set', 'path', default="data/test_sets")
+            test_file_path = Path(f"{test_sets_path}/{exchange}/{symbol_safe}/{timeframe}_test.csv")
             
-            if test_file.exists():
+            if test_file_path.exists():
                 # Load existing test set
-                self.logger.info(f"Loading existing test set from {test_file}")
-                test_df = pd.read_csv(test_file, index_col='timestamp', parse_dates=True)
+                self.logger.info(f"Loading existing test set from {test_file_path}")
+                test_df = pd.read_csv(test_file_path, index_col='timestamp', parse_dates=True)
                 
-                # Load original data to get the training set
-                input_file = Path(f"data/processed/{exchange}/{symbol_safe}/{timeframe}.csv")
-                full_df = pd.read_csv(input_file, index_col='timestamp', parse_dates=True)
+                # Create test DataContext
+                test_context = DataContext(self.params, test_df, exchange, symbol, timeframe, source="test_set")
                 
                 # Identify training data (all data not in test set)
-                # We match by index (timestamp) rather than trying to guess split ratio
-                train_df = full_df[~full_df.index.isin(test_df.index)].copy()
-                
+                train_df = data_context.df[~data_context.df.index.isin(test_df.index)].copy()
+            
                 self.logger.info(f"Identified original training set with {len(train_df)} samples")
             else:
                 # No existing test set, create a new split and run normal training first
                 self.logger.info("No existing test set found. Creating new train-test split")
                 
-                # Load data
-                input_file = Path(f"data/processed/{exchange}/{symbol_safe}/{timeframe}.csv")
-                full_df = pd.read_csv(input_file, index_col='timestamp', parse_dates=True)
-                
-                # Create target
-                full_df['target'] = self.create_target(full_df)
-                
-                # Drop rows with NaN targets
-                full_df = full_df.dropna(subset=['target'])
-                
-                # Chronological train-test split
-                train_size = int(len(full_df) * (1 - test_size))
-                train_df = full_df.iloc[:train_size].copy()
-                test_df = full_df.iloc[train_size:].copy()
+                # Create train-test split
+                splits = data_context.create_time_split(test_size=test_size)
+                train_df = splits['train']
+                test_df = splits['test']
                 
                 self.logger.info(f"Created new train-test split: train={len(train_df)}, test={len(test_df)} samples")
                 
                 # Save test set for future use
-                test_output_dir = Path(f"data/test_sets/{exchange}/{symbol_safe}")
-                test_output_dir.mkdir(parents=True, exist_ok=True)
-                test_output_file = test_output_dir / f"{timeframe}_test.csv"
+                test_context = DataContext(self.params, test_df, exchange, symbol, timeframe, source="test_set")
+                test_output_path = Path(f"{test_sets_path}/{exchange}/{symbol_safe}")
+                test_output_path.mkdir(parents=True, exist_ok=True)
+                test_output_file = test_output_path / f"{timeframe}_test.csv"
                 test_df.to_csv(test_output_file)
+                test_context.add_processing_step("save_test_set", {"path": str(test_output_file)})
                 self.logger.info(f"Saved test set to {test_output_file}")
                 
                 # Run normal training first
@@ -557,6 +609,15 @@ class BayesianModel:
                 
                 # Build and train model
                 self.build_model(X_train_scaled, y_train)
+            
+                # Store DataContext metadata for model reproducibility
+                self.data_context_metadata = {
+                    "processing_history": data_context.get_processing_history(),
+                    "feature_columns": self.feature_cols,
+                    "training_samples": len(train_df),
+                    "test_samples": len(test_df),
+                    "target_distribution": {str(v): int((train_df['target'] == v).sum()) for v in train_df['target'].unique()}
+                }
                 
                 # Save original model
                 self.save_model()
@@ -657,6 +718,20 @@ class BayesianModel:
             else:
                 self.logger.warning("CONCLUSION: Model shows poor consistency, may be overfit or unstable")
             
+            # Store DataContext metadata for reversed model
+            self.data_context_metadata = {
+                "processing_history": test_context.get_processing_history(),
+                "reversed_training": True,
+                "feature_columns": self.feature_cols,
+                "training_samples": len(test_df),  # Now training on test data
+                "test_samples": len(train_df),     # Now testing on train data
+                "target_distribution": {str(v): int((test_df['target'] == v).sum()) for v in test_df['target'].unique()}
+            }
+            
+            # Save reversed model with indicator
+            params.set("reversed", 'model', 'suffix')
+            self.save_model()
+            
             return train_df, test_df, comparison_metrics
             
         except Exception as e:
@@ -694,14 +769,15 @@ class BayesianModel:
             suffix = suffix if suffix is not None else param_suffix
             
             # Create safe path elements
-            model_type = self.__class__.__name__.lower()
+            models_path = params.get('model', 'path', default="models")
             symbol_safe = symbol.replace('/', '_')
+            model_type = self.__class__.__name__.lower()
             
             # Create timestamp
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             
             # Create base directory structure
-            model_dir = Path(f"models/{symbol_safe}/{timeframe}/{model_type}") # TODO: get path from param
+            model_dir = Path(f"{models_path}/{symbol_safe}/{timeframe}/{model_type}")
             model_dir.mkdir(parents=True, exist_ok=True)
             
             # Create base filename with optional elements
@@ -727,6 +803,7 @@ class BayesianModel:
             trace_path = model_dir / f"{filename_base}_trace.netcdf"
             feat_cols_path = model_dir / f"{filename_base}_feature_cols.pkl"
             metrics_path = model_dir / f"{filename_base}_metrics.json"
+            data_context_path = model_dir / f"{filename_base}_data_context.json"
             
             # Save scaler
             with open(scaler_path, 'wb') as f:
@@ -755,14 +832,20 @@ class BayesianModel:
             with open(metrics_path, 'w') as f:
                 json.dump(metrics, f, indent=2)
             
+            # Save data context metadata if available
+            if hasattr(self, 'data_context_metadata') and self.data_context_metadata:
+                with open(data_context_path, 'w') as f:
+                    json.dump(self.data_context_metadata, f, indent=2)
+            
             # Create a symlink with a version or to the latest model
             version_scaler = model_dir / f"{version}_scaler.pkl"
             version_trace = model_dir / f"{version}_trace.netcdf"
             version_feat_cols = model_dir / f"{version}_feature_cols.pkl"
             version_metrics = model_dir / f"{version}_metrics.json"
-            
+            version_data_context = model_dir / f"{version}_data_context.json"  # Add this line
+    
             # Remove existing symlinks if they exist
-            for path in [version_scaler, version_trace, version_feat_cols, version_metrics]:
+            for path in [version_scaler, version_trace, version_feat_cols, version_metrics, version_data_context]:
                 if path.exists() or path.is_symlink():
                     path.unlink()
             
@@ -771,7 +854,8 @@ class BayesianModel:
             version_trace.symlink_to(trace_path.name)
             version_feat_cols.symlink_to(feat_cols_path.name)
             version_metrics.symlink_to(metrics_path.name)
-            
+            version_data_context.symlink_to(data_context_path.name)  # Add this line
+
             # Verify symlinks
             if not version_scaler.exists() or version_scaler.stat().st_size == 0:
                 self.logger.warning(f"Symlink verification failed for {version_scaler}. Attempting absolute path.")
@@ -915,6 +999,15 @@ class BayesianModel:
                 if model_files['feat_cols'].exists():
                     with open(model_files['feat_cols'], 'rb') as f:
                         self.feature_cols = pickle.load(f)
+                
+                # Load data context metadata if available
+                data_context_path = model_dir / f"{version}_data_context.json"
+                if data_context_path.exists():
+                    with open(data_context_path, 'r') as f:
+                        self.data_context_metadata = json.load(f)
+                        self.logger.info("Loaded data context metadata")
+                else:
+                    self.logger.warning("No data context metadata found")
                 
                 self.logger.info(f"Model loaded successfully")
                 return True
@@ -1197,13 +1290,14 @@ class BayesianModel:
         symbols = params.get('data', 'symbols')
         timeframes = params.get('data', 'timeframes')
         exchange = params.get('data', 'exchanges', 0)
-        max_samples = params.get('model', 'max_samples_per_batch', default=500000)
+        max_samples = params.get('training', 'max_samples_per_batch', default=50000)
         
         self.logger.info(f"Training model on multiple symbols and timeframes")
         
         # Lists to store all training data
         all_X = []
         all_y = []
+        all_contexts = []
         
         # Calculate maximum samples per source to stay within memory limits
         max_rows_per_source = max_samples // (len(symbols) * len(timeframes))
@@ -1214,63 +1308,59 @@ class BayesianModel:
                 self.logger.info(f"Processing {symbol} {timeframe}")
                 
                 try:
-                    # Load processed data
-                    symbol_safe = symbol.replace('/', '_')
-                    input_file = Path(f"data/processed/{exchange}/{symbol_safe}/{timeframe}.csv")
+                    # Load processed data using DataContext
+                    data_context = DataContext.from_processed_data(self.params, exchange, symbol, timeframe)
                     
-                    if not input_file.exists():
-                        self.logger.warning(f"No processed data file found at {input_file}")
+                    if data_context is None:
+                        self.logger.warning(f"Failed to load data for {symbol} {timeframe}")
                         continue
                         
-                    df = pd.read_csv(input_file, index_col='timestamp', parse_dates=True)
+                    # Validate the data has required columns
+                    if not data_context.validate(required_columns=self.feature_cols + ['open', 'high', 'low', 'close', 'volume']):
+                        continue
                     
-                    # Create target
-                    df['target'] = self.create_target(df)
+                    # Create target if not already present
+                    if 'target' not in data_context.df.columns:
+                        self.logger.info(f"Creating target variables for {symbol} {timeframe}")
+                        data_context.df['target'] = self.create_target(data_context.df)
+                        data_context.add_processing_step("create_target", {"forward_window": 60})
                     
                     # Drop rows with NaN targets
-                    df = df.dropna(subset=['target'])
+                    data_context.df = data_context.df.dropna(subset=['target'])
+                    data_context.add_processing_step("dropna", {"subset": ['target']})
                     
                     # Sample data if it exceeds the per-source limit
                     if len(df) > max_rows_per_source:
                         self.logger.info(f"Dataset too large, sampling {max_rows_per_source} rows from {symbol} {timeframe}")
                         
-                        # Stratified sampling to maintain class distribution
-                        y_values = df['target'].values
-                        unique_classes, counts = np.unique(y_values, return_counts=True)
-                        min_class_count = np.min(counts)
+                        # Use stratified sampling to maintain class distribution
+                        sampled_df = pd.DataFrame()
+                        for target_value in data_context.df['target'].unique():
+                            target_df = data_context.df[data_context.df['target'] == target_value]
+                            # Calculate how many samples to take from this class
+                            n_samples = min(len(target_df), int(max_rows_per_source * len(target_df) / len(data_context.df)))
+                            sampled = target_df.sample(n_samples)
+                            sampled_df = pd.concat([sampled_df, sampled])
                         
-                        # Calculate samples per class to maintain balance
-                        samples_per_class = min(min_class_count, max_rows_per_source // len(unique_classes))
-                        
-                        # Get indices for each class
-                        sampled_indices = []
-                        for cls in unique_classes:
-                            cls_indices = df.index[df['target'] == cls]
-                            if len(cls_indices) > samples_per_class:
-                                sampled_cls_indices = np.random.choice(
-                                    cls_indices, 
-                                    size=samples_per_class, 
-                                    replace=False
-                                )
-                                sampled_indices.extend(sampled_cls_indices)
-                            else:
-                                # If we don't have enough samples of this class, take all of them
-                                sampled_indices.extend(cls_indices)
-                        
-                        # Sample the dataframe
-                        df = df.loc[sampled_indices]
+                        data_context.df = sampled_df
+                        data_context.add_processing_step("stratified_sampling", {
+                            "original_size": len(data_context.df),
+                            "sampled_size": len(sampled_df),
+                            "max_rows_per_source": max_rows_per_source
+                        })
                     
                     # Extract features and target
-                    X = df[self.feature_cols].values
-                    y = df['target'].values
+                    X = data_context.df[self.feature_cols].values
+                    y = data_context.df['target'].values
                     
                     # Append to combined datasets
                     all_X.append(X)
                     all_y.append(y)
+                    all_contexts.append(data_context)
                     self.logger.info(f"Added {len(X)} rows from {symbol} {timeframe}")
                     
                 except Exception as e:
-                    self.logger.error(f"BMLOG. Error processing {symbol} {timeframe}: {str(e)}")
+                    self.logger.error(f"Error processing {symbol} {timeframe}: {str(e)}")
                     import traceback
                     self.logger.error(traceback.format_exc())
                     continue
@@ -1314,11 +1404,21 @@ class BayesianModel:
         try:
             self.build_model(X_combined_scaled, y_combined)
             
-            # Create a model name based on symbols and timeframes
-            model_name = self._generate_multi_model_name(symbols, timeframes)
+            # Store combined DataContext metadata
+            self.data_context_metadata = {
+                "multi_symbol_model": True,
+                "symbols": symbols,
+                "timeframes": timeframes,
+                "exchange": exchange,
+                "sample_counts": {f"{ctx.symbol}_{ctx.timeframe}": len(ctx.df) for ctx in all_contexts},
+                "processing_histories": {f"{ctx.symbol}_{ctx.timeframe}": ctx.get_processing_history() for ctx in all_contexts},
+                "feature_columns": self.feature_cols,
+                "total_samples": len(X_combined),
+                "target_distribution": {str(v): int((y_combined == v).sum()) for v in np.unique(y_combined)}
+            }
             
             # Save model
-            self.save_model_multi(model_name)
+            self.save_model_multi(self._generate_multi_model_name())
             
             self.logger.info(f"Multi-symbol model trained and saved successfully")
             return True
@@ -1438,46 +1538,72 @@ class BayesianModel:
             # Check if custom data is provided via params
             new_data_df = params.get('new_data_df', default=None)
             
-            # If no custom data provided, load from standard location
             if new_data_df is None:
-                # Get new data to train on
-                symbol_safe = symbol.replace('/', '_')
-                data_file = Path(f"data/processed/{exchange}/{symbol_safe}/{timeframe}.csv")
+                # Load new data using DataContext
+                data_context = DataContext.from_processed_data(self.params, exchange, symbol, timeframe)
                 
-                if not data_file.exists():
-                    self.logger.error(f"No processed data found at {data_file}")
+                if data_context is None:
+                    self.logger.error(f"Failed to load data for {symbol} {timeframe}")
                     return False
-
-                # Load the data
-                new_data_df = pd.read_csv(data_file, index_col='timestamp', parse_dates=True)
-                self.logger.info(f"Loaded {len(new_data_df)} rows from {data_file}")
+                    
+                # Validate the data has required columns
+                if not data_context.validate(required_columns=self.feature_cols + ['open', 'high', 'low', 'close', 'volume']):
+                    self.logger.error(f"Data validation failed for {symbol} {timeframe}")
+                    return False
                 
                 # Check for test set to avoid training on it
-                test_file = Path(f"data/test_sets/{exchange}/{symbol_safe}/{timeframe}_test.csv")
-                if test_file.exists():
-                    test_df = pd.read_csv(test_file, index_col='timestamp', parse_dates=True)
+                symbol_safe = symbol.replace('/', '_')
+                test_sets_path = params.get('data', 'test_set', 'path', default="data/test_sets")
+                test_file_path = Path(f"{test_sets_path}/{exchange}/{symbol_safe}/{timeframe}_test.csv")
+            
+                if test_file_path.exists():
+                    test_df = pd.read_csv(test_file_path, index_col='timestamp', parse_dates=True)
                     self.logger.info(f"Found test set with {len(test_df)} rows")
                     
                     # Remove test data from training data
-                    new_data_df = new_data_df[~new_data_df.index.isin(test_df.index)]
-                    self.logger.info(f"Removed test data, {len(new_data_df)} rows remaining for training")
-
+                    data_context.df = data_context.df[~data_context.df.index.isin(test_df.index)]
+                    data_context.add_processing_step("remove_test_data", {"removed_rows": len(test_df)})
+                    self.logger.info(f"Removed test data, {len(data_context.df)} rows remaining for training")
+                    
                 # Apply data sampling if dataset is too large
-                max_samples = params.get('model', 'max_samples_per_batch', default=100000)
-                if len(new_data_df) > max_samples:
+                max_samples = params.get('training', 'max_samples_per_batch', default=100000)
+                if len(data_context.df) > max_samples:
                     self.logger.info(f"Dataset too large, sampling {max_samples} rows")
-                    new_data_df = new_data_df.sample(max_samples, random_state=42)
+                    
+                    # Use stratified sampling
+                    sampled_df = pd.DataFrame()
+                    for target_value in data_context.df['target'].unique():
+                        target_df = data_context.df[data_context.df['target'] == target_value]
+                        n_samples = min(len(target_df), int(max_samples * len(target_df) / len(data_context.df)))
+                        sampled = target_df.sample(n_samples)
+                        sampled_df = pd.concat([sampled_df, sampled])
+                    
+                    data_context.df = sampled_df
+                    data_context.add_processing_step("stratified_sampling", {
+                        "original_size": len(data_context.df),
+                        "sampled_size": len(sampled_df),
+                        "sampling_method": "stratified"
+                    })
+                
+                new_data_df = data_context.df
             else:
+                # Create a DataContext for the custom data
+                data_context = DataContext(self.params, new_data_df, exchange, symbol, timeframe, source="custom_data")
                 self.logger.info(f"Using provided custom dataframe with {len(new_data_df)} samples")
-            
+                
             # Process data
-            if 'target' not in new_data_df.columns:
+            if 'target' not in data_context.df.columns:
                 self.logger.info("Creating target variables for new data")
-                new_data_df['target'] = self.create_target(new_data_df)
+                data_context.df['target'] = self.create_target(data_context.df)
+                data_context.add_processing_step("create_target", {"forward_window": 60})
+            
+            # Drop rows with NaN targets
+            data_context.df = data_context.df.dropna(subset=['target'])
+            data_context.add_processing_step("dropna", {"subset": ['target']})
             
             # Extract features and target
-            X_new = new_data_df[self.feature_cols].values
-            y_new = new_data_df['target'].values
+            X_new = data_context.df[self.feature_cols].values
+            y_new = data_context.df['target'].values
             
             # Scale new data using existing scaler
             X_new_scaled = self.scaler.transform(X_new)
@@ -1512,10 +1638,26 @@ class BayesianModel:
             self.model = new_model
             self.trace = new_trace
             
+            # Update the data_context_metadata
+            if hasattr(self, 'data_context_metadata') and self.data_context_metadata:
+                # Update existing metadata
+                self.data_context_metadata["continued_training"] = True
+                self.data_context_metadata["additional_samples"] = len(data_context.df)
+                self.data_context_metadata["continuation_history"] = data_context.get_processing_history()
+            else:
+                # Create new metadata
+                self.data_context_metadata = {
+                    "continued_training": True,
+                    "feature_columns": self.feature_cols,
+                    "training_samples": len(data_context.df),
+                    "processing_history": data_context.get_processing_history(),
+                    "target_distribution": {str(v): int((data_context.df['target'] == v).sum()) for v in data_context.df['target'].unique()}
+                }
+            
             # Save updated model
             self.save_model()
             
-            self.logger.info(f"Model continued training successfully with {len(new_data_df)} samples")
+            self.logger.info(f"Model continued training successfully with {len(data_context.df)} samples")
             return True
             
         except Exception as e:
@@ -1525,39 +1667,52 @@ class BayesianModel:
             return False
         
     def train_with_reservoir(self):
-        """Train model using reservoir sampling to maintain a representative dataset"""
+        """
+        Train model using reservoir sampling to maintain a representative dataset
+        using DataContext for tracking processing steps
+        """
         # Get parameters from ParamManager
         params = self.params
         exchange = params.get('data', 'exchanges', 0)
         symbol = params.get('data', 'symbols', 0)
         timeframe = params.get('data', 'timeframes', 0)
-        max_samples = params.get('model', 'reservoir_size', default=10000)
+        max_samples = params.get('model', 'reservoir_sample_size', default=50000)
     
         # Get new data from params
         new_data_df = params.get('new_data_df', default=None)
         if new_data_df is None:
             self.logger.error("No new data provided via params.set('new_data_df', df)")
             return False
+    
+        # Create DataContext for new data
+        new_data_context = DataContext(self.params, new_data_df, exchange, symbol, timeframe, source="new_data")
+        
         
         # Check if we already have a reservoir
-        reservoir_path = Path(f"data/reservoir/{exchange}/{symbol.replace('/', '_')}/{timeframe}.csv")
+        symbol_safe = symbol.replace('/', '_')
+        reservoir_path = params.get('data', 'reservoir', 'path', default="data/reservoir")
+        reservoir_dir = Path(f"{reservoir_path}/{exchange}/{symbol_safe}/{timeframe}.csv")
         
-        if reservoir_path.exists():
+        if reservoir_dir.exists():
             # Load existing reservoir
-            reservoir_df = pd.read_csv(reservoir_path, index_col='timestamp', parse_dates=True)
+            reservoir_df = pd.read_csv(reservoir_dir, index_col='timestamp', parse_dates=True)
+            reservoir_context = DataContext(self.params, reservoir_df, exchange, symbol, timeframe, source="reservoir")
             self.logger.info(f"Loaded existing reservoir with {len(reservoir_df)} samples")
         else:
             # Create new reservoir
             reservoir_df = pd.DataFrame()
-            reservoir_path.parent.mkdir(parents=True, exist_ok=True)
+            reservoir_context = DataContext(self.params, reservoir_df, exchange, symbol, timeframe, source="new_reservoir")
+            reservoir_dir.parent.mkdir(parents=True, exist_ok=True)
         
         # Add new data using reservoir sampling
         if len(reservoir_df) < max_samples:
             # Reservoir not full yet, just append
             reservoir_df = pd.concat([reservoir_df, new_data_df])
+            reservoir_context.add_processing_step("append_data", {"added_samples": len(new_data_df)})
             if len(reservoir_df) > max_samples:
                 # If we exceeded max_samples, randomly sample
                 reservoir_df = reservoir_df.sample(max_samples)
+                reservoir_context.add_processing_step("random_sample", {"target_size": max_samples})
         else:
             # Reservoir full, randomly replace elements
             for i, row in new_data_df.iterrows():
@@ -1566,60 +1721,120 @@ class BayesianModel:
                     replace_idx = np.random.randint(0, len(reservoir_df))
                     reservoir_df.iloc[replace_idx] = row
         
+            reservoir_context.add_processing_step("reservoir_sample", {
+                "new_samples_processed": len(new_data_df),
+                "reservoir_size": max_samples
+            })
+        
         # Save updated reservoir
-        reservoir_df.to_csv(reservoir_path)
+        reservoir_df.to_csv(reservoir_dir)
+        reservoir_context.df = reservoir_df  # Update the DataFrame in the context
         self.logger.info(f"Updated reservoir with {len(reservoir_df)} samples")
         
-        # Train on the reservoir
-        params.set(reservoir_df, 'custom_df')
-        return self.train()
+        # Set the prepared DataFrame as input
+        self.params.set('model', 'input_dataframe', reservoir_df)
+        
+        # Call standard train method with reservoir metadata
+        result = self.train()
+        
+        # Update metadata specific to reservoir sampling
+        if hasattr(self, 'data_context_metadata') and self.data_context_metadata:
+            self.data_context_metadata["reservoir_training"] = True
+            self.data_context_metadata["reservoir_size"] = len(reservoir_df)
+        
+        return result
     
     def train_with_time_weighting(self):
-        """Train with time-weighted sampling (newer data gets higher probability)"""
+        """
+        Train with time-weighted sampling (newer data gets higher probability)
+        using DataContext to track processing steps
+        """
         # Get parameters from ParamManager
         params = self.params
+        exchange = params.get('data', 'exchanges', 0)
+        symbol = params.get('data', 'symbols', 0)
+        timeframe = params.get('data', 'timeframes', 0)
         recency_weight = params.get('training', 'recency_weight', default=2.0)
     
-        # Get all data from params
-        all_data_df = params.get('all_data_df', default=None)
-        if all_data_df is None:
-            self.logger.error("No data provided via params.set('all_data_df', df)")
+        # Get all data using DataContext
+        data_context = DataContext.from_processed_data(self.params, exchange, symbol, timeframe)
+        
+        if data_context is None:
+            self.logger.error(f"Failed to load data for {symbol} {timeframe}")
+            return False
+            
+        # Validate the data has required columns
+        if not data_context.validate(required_columns=self.feature_cols + ['open', 'high', 'low', 'close', 'volume']):
             return False
         
+        # Create target if not already present
+        if 'target' not in data_context.df.columns:
+            self.logger.info("Creating target variables")
+            data_context.df['target'] = self.create_target(data_context.df)
+            data_context.add_processing_step("create_target", {"forward_window": 60})
+        
+        # Drop rows with NaN targets
+        data_context.df = data_context.df.dropna(subset=['target'])
+        data_context.add_processing_step("dropna", {"subset": ['target']})
+        
         # Sort by time
-        all_data_df = all_data_df.sort_index()
+        data_context.df = data_context.df.sort_index()
         
         # Create time-based weights (newer data gets higher weight)
-        time_indices = np.arange(len(all_data_df))
-        weights = np.exp(recency_weight * time_indices / len(all_data_df))
+        time_indices = np.arange(len(data_context.df))
+        weights = np.exp(recency_weight * time_indices / len(data_context.df))
         weights = weights / weights.sum()  # Normalize
         
         # Sample with weights
-        sample_size = min(len(all_data_df), 50000)  # Adjust as needed
+        sample_size = min(len(data_context.df), params.get('model', 'max_samples_per_batch', default=50000))
         sampled_indices = np.random.choice(
-            len(all_data_df), 
+            len(data_context.df), 
             size=sample_size, 
             replace=False, 
             p=weights
         )
         
-        sampled_df = all_data_df.iloc[sampled_indices]
+        sampled_df = data_context.df.iloc[sampled_indices]
+        
+        # Update DataContext with sampled data
+        data_context.df = sampled_df
+        data_context.add_processing_step("time_weighted_sampling", {
+            "original_size": len(data_context.df),
+            "sampled_size": sample_size,
+            "recency_weight": recency_weight
+        })
         
         # Train on weighted sample
-        params.set(sampled_df, 'custom_df')
-        return self.train()
+        X_train = sampled_df[self.feature_cols].values
+        y_train = sampled_df['target'].values
         
-    def run_backtest_with_position_sizing(self, df, no_trade_threshold=0.96, 
+        # Scale features
+        X_train_scaled = self.scaler.fit_transform(X_train)
+        
+        # Build and train model
+        self.logger.info(f"Training model on time-weighted sample with {len(sampled_df)} samples")
+        self.build_model(X_train_scaled, y_train)
+        
+        # Store DataContext metadata
+        self.data_context_metadata = {
+            "time_weighted_training": True,
+            "recency_weight": recency_weight,
+            "sample_size": sample_size,
+            "feature_columns": self.feature_cols,
+            "processing_history": data_context.get_processing_history(),
+            "target_distribution": {str(v): int((sampled_df['target'] == v).sum()) for v in sampled_df['target'].unique()}
+        }
+        
+        # Save model
+        self.save_model()
+        
+        return True
+        
+    def run_backtest_with_position_sizing(self, df=None, no_trade_threshold=0.96, 
                                             min_position_change=0.025, compound_returns=True, exaggerate=True):
         """
         Run backtest with continuous position sizing based on probability distributions
     
-        This implementation:
-        1. Treats long and short positions separately (can have both simultaneously)
-        2. Position sizes directly correspond to probability values 
-        3. Only updates positions when probability changes exceed threshold
-        4. Optionally compounds returns to grow/shrink position sizes
-        5. Optionally exaggerates position sizes to increase contrast between signals
         
         Args:
             df (DataFrame): Price data with OHLCV columns
@@ -1631,25 +1846,55 @@ class BayesianModel:
         Returns:
             tuple: (results_df, metrics, fig) with backtest results, performance metrics, and visualization
         """
+        exchange = self.params.get('data', 'exchanges', 0)
         symbol = self.params.get('data', 'symbols', 0)
         timeframe = self.params.get('data', 'timeframes', 0)
         exaggerate = self.params.get('backtesting', 'exaggerate', default=exaggerate)
         min_position_change = self.params.get('backtesting', 'min_position_change', default=min_position_change)
-        
+        backtest_source = "test_set"
         self.logger.info(f"Running position sizing backtest for {symbol} {timeframe}")
         
         try:
-            # 1. Get probabilistic predictions
+            # If no DataFrame provided, load using DataContext
+            if df is None:
+                # Try to load the test set first
+                symbol_safe = symbol.replace('/', '_')
+                test_sets_path = self.params.get('data', 'test_set', 'path', default="data/test_sets")
+                test_file_path = Path(f"{test_sets_path}/{exchange}/{symbol_safe}/{timeframe}_test.csv")
+                
+                if test_file_path.exists():
+                    self.logger.info(f"Loading test set from {test_file_path}")
+                    test_df = pd.read_csv(test_file_path, index_col='timestamp', parse_dates=True)
+                    test_context = DataContext(self.params, test_df, exchange, symbol, timeframe, source="test_set")
+                    df = test_df
+                    backtest_source = "test_set"
+                else:
+                    # No test set, load processed data
+                    self.logger.info("No test set found, loading processed data")
+                    data_context = DataContext.from_processed_data(self.params, exchange, symbol, timeframe)
+                    
+                    if data_context is None:
+                        self.logger.error(f"Failed to load data for {symbol} {timeframe}")
+                        return False, False, False
+                        
+                    # Validate the data has required columns
+                    if not data_context.validate(required_columns=self.feature_cols + ['open', 'high', 'low', 'close', 'volume']):
+                        return False, False, False
+                    
+                    df = data_context.df
+                    backtest_source = "processed_data"
+                    
+            # Get probabilistic predictions
             probabilities = self.predict_probabilities(df)
             
             if probabilities is None:
                 self.logger.error("Failed to get probability predictions")
-                return False
+                return False, False, False
                 
-            # 2. Create a copy of the dataframe for backtesting
+            # Create a copy of the dataframe for backtesting
             results = df.copy()
             
-            # 3. Add probability columns
+            # Add probability columns
             results['short_prob'] = probabilities[:, 0]
             results['no_trade_prob'] = probabilities[:, 1]
             results['long_prob'] = probabilities[:, 2]
@@ -1658,7 +1903,7 @@ class BayesianModel:
             results['original_long_prob'] = results['long_prob'].copy()
             results['original_short_prob'] = results['short_prob'].copy()
             
-            # 4. Apply exaggeration if enabled
+            # Apply exaggeration if enabled
             if exaggerate:
             
                 # Calculate the redistributable probability (what's below no_trade_threshold)
@@ -1701,7 +1946,7 @@ class BayesianModel:
                                 results.iloc[i, results.columns.get_loc('long_prob')] = long_prob + long_boost
                                 results.iloc[i, results.columns.get_loc('short_prob')] = short_prob + short_boost
             
-            # 5. Calculate raw position sizes directly from probabilities
+            # Calculate raw position sizes directly from probabilities
             # Ignore probabilities if no_trade is high
             results['raw_long_position'] = np.where(
                 results['no_trade_prob'] >= no_trade_threshold,
@@ -1715,27 +1960,23 @@ class BayesianModel:
                 results['short_prob']  # Otherwise use short probability directly
             )
         
-            # 6. Initialize compounding factor (starting with 1.0 = 100% of base size)
+            # Initialize compounding factor (starting with 1.0 = 100% of base size)
             if compound_returns:
                 results['compound_factor'] = 1.0
             
-            # 7. Apply minimum change threshold to avoid fee churn
+            # Apply minimum change threshold to avoid fee churn
             # Handle each position type separately
             results['long_position'] = 0.0
             results['short_position'] = 0.0
-            prev_long = 0.0
-            prev_short = 0.0
             
-            # 8. Calculate price return
+            # Calculate price return
             results['price_return'] = results['close'].pct_change()
             
-            # 9. Loop through data and calculate positions with optional compounding
+            # Loop through data and calculate positions with optional compounding
             compound_factor = 1.0  # Start with base sizing
             realized_pnl = 0.0     # Track realized P&L for compounding
             prev_long = 0.0
             prev_short = 0.0
-            
-            account_size = 1.0
             
             for i in range(len(results)):
                 # Get raw position signals based on probabilities
@@ -1780,8 +2021,7 @@ class BayesianModel:
                 else:
                     # No change to long position
                     new_long = prev_long
-                        
-                        
+                                    
                 # Same logic for short positions
                 if short_change >= min_position_change:
                     # Position is changing - ONLY NOW do we realize P&L and compound
@@ -1818,38 +2058,39 @@ class BayesianModel:
                 # Store positions and compound factor
                 results.iloc[i, results.columns.get_loc('long_position')] = new_long
                 results.iloc[i, results.columns.get_loc('short_position')] = new_short
-                results.iloc[i, results.columns.get_loc('compound_factor')] = compound_factor
-                
+                if compound_returns:
+                    results.iloc[i, results.columns.get_loc('compound_factor')] = compound_factor
+            
                 # Update previous positions for next iteration
                 prev_long = new_long
                 prev_short = new_short
             
-            # 10. Calculate net position (for compatibility)
+            # Calculate net position (for compatibility)
             results['position'] = results['long_position'] - results['short_position']
             
-            # 11. Calculate separate returns for long and short positions
+            # Calculate separate returns for long and short positions
             results['long_return'] = results['long_position'].shift(1) * results['price_return']
             results['short_return'] = -1 * results['short_position'].shift(1) * results['price_return']  # Negative for shorts
             results['strategy_return'] = results['long_return'] + results['short_return']
             
-            # 12. Add fee impact - fees are proportional to position change
+            # Add fee impact - fees are proportional to position change
             fee_rate = self.params.get('exchange', 'fee_rate', default=0.0006)
             results['long_change'] = results['long_position'].diff().abs()
             results['short_change'] = results['short_position'].diff().abs()
             results['fee_impact'] = (results['long_change'] + results['short_change']) * fee_rate
             
-            # 13. Net returns after fees
+            # Net returns after fees
             results['net_return'] = results['strategy_return'] - results['fee_impact']
         
-            # 14. Calculate cumulative returns
+            # Calculate cumulative returns
             results['price_cumulative'] = (1 + results['price_return'].fillna(0)).cumprod() - 1
             results['strategy_cumulative'] = (1 + results['net_return'].fillna(0)).cumprod() - 1
             
-            # 15. Calculate separate cumulative returns for long and short
+            # Calculate separate cumulative returns for long and short
             results['long_cumulative'] = (1 + results['long_return'].fillna(0)).cumprod() - 1
             results['short_cumulative'] = (1 + results['short_return'].fillna(0)).cumprod() - 1
             
-            # 16. Calculate performance metrics
+            # Calculate performance metrics
             metrics = self._calculate_position_sizing_metrics(results, min_position_change)
             
             # Information about the backtest
@@ -1879,25 +2120,47 @@ class BayesianModel:
                 metrics['max_long_boost'] = (results['long_prob'] - results['original_long_prob']).max()
                 metrics['max_short_boost'] = (results['short_prob'] - results['original_short_prob']).max()
             
-            # 17. Create visualization using result logger
+            # Create a backtest context to track all operations
+            backtest_context = DataContext(
+                self.params, 
+                results, 
+                exchange, 
+                symbol, 
+                timeframe, 
+                source=f"backtest_{backtest_source}"
+            )
+        
+            # Add backtest parameters to processing history
+            backtest_context.add_processing_step("position_sizing_backtest", {
+                "no_trade_threshold": no_trade_threshold,
+                "min_position_change": min_position_change,
+                "compound_returns": compound_returns,
+                "exaggerate": exaggerate,
+                "test_length": len(results),
+                "date_range": f"{results.index[0]} to {results.index[-1]}"
+            })
+            # Add context metadata to metrics
+            metrics['backtest_context'] = backtest_context.get_processing_history()
+        
+            # Create visualization using result logger
             from ..core.result_logger import ResultLogger
-            result_logger = ResultLogger(getattr(self, 'params', {}))
+            result_logger = ResultLogger(self.params)
 
             # Strategy type suffix based on exaggeration
             strategy_type = 'position_sizing_exaggerated' if exaggerate else 'position_sizing'
 
-            # Save results to standardized formats
-            files = result_logger.save_results(results, metrics, strategy_type=strategy_type)
-
+            # Save results to standardized formats with context metadata included
+            saved_files = result_logger.save_results(results, metrics, strategy_type=strategy_type)
+        
             # Create visualizations
             viz_files = result_logger.plot_results(results, metrics, strategy_type=strategy_type)
             
             # Add visualization paths to metrics
             metrics['visualization_files'] = viz_files
+            metrics['data_files'] = saved_files
             
             # Return results
-            fig = None  # The ResultLogger already saved the figures
-            return results, metrics, fig
+            return results, metrics, None
             
         except Exception as e:
             self.logger.error(f"Error in position sizing backtest: {str(e)}")

@@ -21,8 +21,8 @@ okx:
   password: YOUR_API_PASSWORD_HERE  # OKX requires a password/passphrase
   testnet: true
 
-  kucoin:
-    api_key: YOUR_API_KEY_HERE
-    api_secret: YOUR_API_SECRET_HERE
-    passphrase: YOUR_API_PASSPHRASE_HERE  # KuCoin requires a passphrase
-    testnet: true
+kucoin:
+  api_key: YOUR_API_KEY_HERE
+  api_secret: YOUR_API_SECRET_HERE
+  passphrase: YOUR_API_PASSPHRASE_HERE  # KuCoin requires a passphrase
+  testnet: true
