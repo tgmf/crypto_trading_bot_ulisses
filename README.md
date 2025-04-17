@@ -1,4 +1,4 @@
-# QuantumTrader 🔄
+# Ulisses the Trading Bot 🔄
 
 A cryptocurrency trading system using Bayesian and quantum-inspired probabilistic decision making.
 
@@ -113,7 +113,8 @@ The system uses a centralized parameter management approach with ParamManager, w
 - Automatic type conversion
 - Required parameter validation
 
-3. Configuration File:
+3. Base Configuration File
+/config/base.yaml:
 
 ```yaml
 
@@ -134,10 +135,22 @@ model:
 # Exchange Configuration
 exchange:
   fee_rate: 0.0006  # Per-side fee rate
-
 ```
 
-4. Environment Variables
+4. Modular Configuration Files 
+/config/model/bayesian.yaml:
+```yaml
+model:
+  type: 'bayesian'
+  max_samples_per_batch: 100000
+
+  features:
+    volatility:
+      enabled: true
+      window: 20
+```
+
+5. Environment Variables
 You can also set configuration with environment variables in a .env file:
 
 ```bash
@@ -151,7 +164,7 @@ MAX_MEMORY=8000
 CHUNK_SIZE=50000
 ```
 
-5. Templates with common parameters
+6. Templates with common parameters
 You can use custom templates that will overwrite variables:
 ```bash
 ./launch train --template crypto_bluechips
@@ -185,10 +198,17 @@ Validates model consistency by swapping train and test sets, detecting overfitti
 ```
 Tests model robustness across different assets and timeframes.
 
+
+## Custom Feature Generators
+
+/features/ directory contains custom feature generators that can be used by the trading bot, without modifying the core code in `/src`.
+
+Read dedicated README in the directory for instructions.
+ 
 ## 📁 Project Structure
 
 ```
-quantumtrader/
+crypto_trading_bot_ulisses/
 ├── config/               # Configuration files
 │   ├── templates/        # Template files
 │   ├── model/            # Model-specific configuration
@@ -210,6 +230,7 @@ quantumtrader/
 │   └── visualization/    # Visualization tools
 ├── notebooks/            # Jupyter notebooks
 ├── models/               # Saved model artifacts
+├── features/             # Custom features for training models
 └── logs/                 # Application logs
 ```
 

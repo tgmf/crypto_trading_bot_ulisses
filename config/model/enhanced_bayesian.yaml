@@ -15,6 +15,62 @@ model:
   max_samples_per_batch: 100000
 
   features:
-    include_sr: True
-    sr_lookbacks: [80]
-    include_sr_breakouts: true
+    # Volatility indicators
+    volatility:
+      enabled: true
+      window: 20
+      range: true
+      atr:
+        enabled: true
+        length: 14
+    
+    # Bollinger Bands
+    bollinger:
+      enabled: false
+      length: 20
+      std: 2.0
+      include_position: true  # bb_pos feature
+      include_squeeze: true   # bb_squeeze feature
+    
+    # RSI indicator
+    rsi:
+      enabled: true
+      length: 14
+      include_diff: false
+    
+    # MACD
+    macd:
+      enabled: false
+      fast: 12
+      slow: 26
+      signal: 9
+      include_hist_diff: false
+    
+    # Moving averages and trend
+    trend:
+      enabled: false
+      ema_short: 9
+      ema_long: 50
+      include_strength: true  # trend_strength feature
+    
+    # Volume indicators
+    volume:
+      enabled: true
+      window: 20
+      include_ratio: true
+    
+    # Support and Resistance
+    support_resistance:
+      enabled: true
+      lookbacks: [80]
+      include_breakouts: true
+    
+    # Advanced features
+    advanced:
+      enabled: false
+      include_ichimoku: false
+      include_donchian: false
+    
+    # Feature metadata generation
+    metadata:
+      enabled: false

@@ -390,6 +390,96 @@ class DataContext:
         
         return self.split
     
+    def create_subset(self, subset_index, total_subsets):
+        """
+        Create a subset of the data for segmented backtesting or analysis
+        
+        Args:
+            subset_index (int): Which subset to use (0-indexed)
+            total_subsets (int): Total number of subsets to divide data into
+                
+        Returns:
+            DataContext: Self for method chaining
+            
+        Raises:
+            ValueError: If subset_index is out of range or parameters are invalid
+        """
+        if self.df is None:
+            raise ValueError("Cannot create subset: DataFrame is None")
+            
+        if subset_index < 0 or total_subsets <= 0:
+            raise ValueError(f"Invalid parameters: subset_index={subset_index}, total_subsets={total_subsets}")
+        
+        # Store original length for logging
+        original_len = len(self.df)
+        
+        # Calculate subset size and boundaries
+        subset_size = len(self.df) // total_subsets
+        if subset_size == 0:
+            raise ValueError(f"Cannot create {total_subsets} subsets from {original_len} rows (too few rows)")
+        
+        # Ensure the dataframe is sorted by index
+        self.df = self.df.sort_index()
+        
+        # Calculate start and end indices
+        start_idx = subset_index * subset_size
+        # For the last subset, include any remaining rows
+        end_idx = len(self.df) if subset_index == total_subsets - 1 else (subset_index + 1) * subset_size
+        
+        if start_idx >= len(self.df):
+            raise ValueError(f"Subset index {subset_index} is out of range for dataset with {len(self.df)} rows")
+        
+        # Extract the subset
+        self.df = self.df.iloc[start_idx:end_idx]
+        
+        # Add to processing history
+        self.add_processing_step("create_subset", {
+            "subset_index": subset_index,
+            "total_subsets": total_subsets,
+            "original_rows": original_len,
+            "subset_rows": len(self.df),
+            "start_idx": start_idx,
+            "end_idx": end_idx,
+            "subset_ratio": 1.0 / total_subsets
+        })
+        
+        # Update source with subset information
+        self.source = f"{self.source}_subset_{subset_index + 1}_of_{total_subsets}"
+        
+        self.logger.info(f"Created subset {subset_index + 1}/{total_subsets} with {len(self.df)}/{original_len} rows")
+        
+        # Update data hash
+        self._data_hash = self._calculate_hash()
+        
+        return self
+    
+    @staticmethod
+    def parse_subset_string(subset_str):
+        """
+        Parse a subset string in format "n/m" (e.g., "1/10")
+        
+        Args:
+            subset_str (str): Subset string to parse
+            
+        Returns:
+            tuple: (subset_index, total_subsets) or (None, None) if invalid
+        """
+        if not subset_str:
+            return None, None
+            
+        try:
+            parts = subset_str.split('/')
+            if len(parts) == 2:
+                subset_index = int(parts[0]) - 1  # Convert to 0-based index
+                total_subsets = int(parts[1])
+                if subset_index < 0 or total_subsets <= 0:
+                    return None, None
+                return subset_index, total_subsets
+        except (ValueError, IndexError):
+            pass
+            
+        return None, None
+    
     def add_processing_step(self, operation, params=None):
         """
         Add operation to processing history with timestamp.

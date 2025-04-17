@@ -28,6 +28,7 @@ import json
 
 from ..models.model_factory import ModelFactory
 from ..core.result_logger import ResultLogger
+from ..data.data_context import DataContext
 
 class BacktestEngine:
     """Engine for backtesting trading strategies"""
@@ -70,146 +71,141 @@ class BacktestEngine:
         symbol = params.get('data', 'symbols', 0)
         timeframe = params.get('data', 'timeframes', 0)
         strategy = params.get('strategy', 'type', default='quantum')
-        test_sets_path = self.params.get('backtesting', 'test_sets', 'path', default='data/test_sets')
-        processed_path = self.params.get('data', 'processed', 'path', default='data/processed')
         
         # Check if subset testing is requested
         subset_str = self.params.get('backtesting', 'test_sets', 'subset', default=None)
-        subset_index = 0
-        subset_ratio = 1.0
+        subset_index, total_subsets = DataContext.parse_subset_string(subset_str)
         
-        if subset_str:
-            self.logger.info(f"Subset testing requested: {subset_str}")
-            try:
-                # Parse subset string in format "n/m" (e.g., "1/10")
-                parts = subset_str.split('/')
-                if len(parts) == 2:
-                    subset_index = int(parts[0]) - 1  # Convert to 0-based index
-                    subset_ratio = 1.0 / float(parts[1])
-                    self.logger.info(f"Using subset {subset_index + 1} of {int(1/subset_ratio)} (size: {subset_ratio*100:.1f}%)")
-                else:
-                    self.logger.warning(f"Invalid subset format '{subset_str}'. Using full test set.")
-                    subset_str = None
-            except ValueError:
-                self.logger.warning(f"Invalid subset parameters in '{subset_str}'. Using full test set.")
-                subset_str = None
-    
         self.logger.info(f"Running backtest for {exchange} {symbol} {timeframe}")
         
         try:
-            # Check for test data first
-            symbol_safe = symbol.replace('/', '_')
-            test_file = Path(f"{test_sets_path}/{exchange}/{symbol_safe}/{timeframe}_test.csv")
+            # First try to load test set using DataContext
+            data_context = DataContext.from_test_set(self.params, exchange, symbol, timeframe)
             
-            # If test data exists, use it (preferred for proper evaluation)
-            if test_file.exists():
-                self.logger.info(f"Using held-out test data from {test_file}")
-                df = pd.read_csv(test_file, index_col='timestamp', parse_dates=True)
-                data_source = "test_set"  # Track the data source
-                
-                # Apply subset if requested
-                if subset_str:
-                    # Sort by timestamp to ensure proper sequential subsetting
-                    df = df.sort_index()
-                    total_rows = len(df)
-                    subset_size = int(total_rows * subset_ratio)
-                    
-                    # Calculate subset boundaries
-                    start_idx = subset_index * subset_size
-                    end_idx = min(start_idx + subset_size, total_rows)
-                    
-                    if start_idx >= total_rows:
-                        self.logger.error(f"Subset index {subset_index + 1} is out of range for dataset with {total_rows} rows")
-                        return False
-                    
-                    # Extract the subset
-                    original_size = len(df)
-                    df = df.iloc[start_idx:end_idx]
-                    self.logger.info(f"Using subset {subset_index + 1}/{int(1/subset_ratio)} with {len(df)}/{original_size} samples")
-                    data_source = f"test_subset_{subset_index + 1}_of_{int(1/subset_ratio)}"
-                    
+            if data_context is not None:
+                self.logger.info(f"Using held-out test data from test set")
+                data_context.add_processing_step("load_test_set", {
+                    "source": "test_set"
+                })
             else:
                 # Fall back to processed data with a warning
-                self.logger.warning(f"No test set found at {test_file}. Using processed data instead. "
+                self.logger.warning(f"No test set found. Using processed data instead. "
                         f"This may lead to overoptimistic results due to possible data leakage.")
                 
-                input_file = Path(f"{processed_path}/{exchange}/{symbol_safe}/{timeframe}.csv")
+                data_context = DataContext.from_processed_data(self.params, exchange, symbol, timeframe)
                 
-                if not input_file.exists():
-                    self.logger.error(f"No processed data file found at {input_file}")
+                if data_context is None:
+                    self.logger.error(f"No processed data found for {symbol} {timeframe}")
                     return False
                     
-                df = pd.read_csv(input_file, index_col='timestamp', parse_dates=True)
-                data_source = "full_data"  # Track the data source
-                
-                # Apply subset if requested on full data (with additional warning)
-                if subset_str:
-                    self.logger.warning("Applying subset selection to full data rather than test data could lead to inconsistent results")
-                    
-                    # Sort by timestamp for sequential subsetting
-                    df = df.sort_index()
-                    total_rows = len(df)
-                    subset_size = int(total_rows * subset_ratio)
-                    
-                    # Calculate subset boundaries
-                    start_idx = subset_index * subset_size
-                    end_idx = min(start_idx + subset_size, total_rows)
-                    
-                    if start_idx >= total_rows:
-                        self.logger.error(f"Subset index {subset_index + 1} is out of range for dataset with {total_rows} rows")
-                        return False
-                    
-                    # Extract the subset
-                    original_size = len(df)
-                    df = df.iloc[start_idx:end_idx]
-                    self.logger.info(f"Using subset {subset_index + 1}/{int(1/subset_ratio)} with {len(df)}/{original_size} samples")
-                    data_source = f"full_data_subset_{subset_index + 1}_of_{int(1/subset_ratio)}"
+                data_context.add_processing_step("load_processed_data", {
+                    "source": "processed_data",
+                    "warning": "Using full data instead of test set could lead to data leakage"
+                })
             
+            # Validate data has the required columns
+            if not data_context.validate(required_columns=['open', 'high', 'low', 'close', 'volume']):
+                self.logger.error("Data validation failed - missing required columns")
+                return False
+            
+            # Apply subset if requested
+            if subset_index is not None and total_subsets is not None:
+                try:
+                    data_context.create_subset(subset_index, total_subsets)
+                except ValueError as e:
+                    self.logger.error(f"Error creating subset: {str(e)}")
+                    return False
+                
             # Load model through the model factory
             model_factory = ModelFactory(self.params)
             model = model_factory.create_model()
             
             if not model.load_model():
                 self.logger.error("Failed to load model for backtesting")
+                data_context.add_processing_step("model_load_error", {
+                    "error": "Failed to load model for backtesting"
+                })
                 return False
-            
+        
+            data_context.add_processing_step("model_loaded", {
+                "model_type": self.params.get('model', 'type', default='auto'),
+                "strategy": strategy
+            })
+        
             # Make sure the dataframe is sorted by timestamp
-            df = df.sort_index()
+            if not data_context.df.index.is_monotonic_increasing:
+                data_context.df = data_context.df.sort_index()
+                data_context.add_processing_step("sort_index", {
+                    "reason": "Ensure chronological order for backtesting"
+                })
+        
             # Get predictions from the model
-            probabilities = model.predict_probabilities(df)
-            
+            self.logger.info(f"Generating predictions for {len(data_context.df)} samples")
+            probabilities = model.predict_probabilities(data_context.df)
+        
             if probabilities is None:
                 self.logger.error("Failed to get predictions for backtesting")
+                data_context.add_processing_step("prediction_error", {
+                    "error": "Failed to get probability predictions from model"
+                })
                 return False
+        
+            data_context.add_processing_step("predictions_generated", {
+                "predictions_shape": probabilities.shape,
+                "data_shape": data_context.df.shape
+            })
             
             # TODO: implement switching between different strategies 
             # Run backtest with quantum-inspired approach
-            backtest_results, metrics = self._run_quantum_backtest(df, probabilities)
+            self.logger.info(f"Running {strategy} backtest with {len(data_context.df)} samples")
+            backtest_results, metrics = self._run_quantum_backtest(data_context.df, probabilities)
         
             # Add data source to metrics
-            metrics['data_source'] = data_source
+            metrics['data_source'] = data_context.source
             
-            # Save and plot results
-            if subset_str:
-                metrics['subset_ratio'] = subset_ratio
-                metrics['subset_index'] = subset_index
-                metrics['subset_size'] = len(df)
-                
-                # Add subset identifier to output filenames
-                suffix = f"_subset_{subset_index + 1}_of_{int(1/subset_ratio)}"
-                params.set([suffix], 'model', 'suffix')
-                self.result_logger.save_results(backtest_results, metrics)
-                self.result_logger.plot_results(backtest_results, metrics)
-            else:
-                self.result_logger.save_results(backtest_results, metrics)
-                self.result_logger.plot_results(backtest_results, metrics)
+            # Add processing history to metrics for full reproducibility
+            metrics['processing_history'] = data_context.get_processing_history()
+        
+            # Generate execution ID for tracking
+            execution_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{symbol}_{timeframe}"
+            metrics['execution_id'] = execution_id
+        
+            # Add final processing step
+            data_context.add_processing_step("backtest_complete", {
+                "execution_id": execution_id,
+                "final_return": metrics.get('final_return', 0),
+                "sharpe_ratio": metrics.get('sharpe_ratio', 0),
+                "total_trades": metrics.get('total_trades', 0)
+            })
             
+            # Set correct suffix for saving results
+            if subset_index is not None:
+                suffix = f"_subset_{subset_index + 1}_of_{total_subsets}"
+                self.params.set(suffix, 'model', 'suffix')
+            
+            self.result_logger.save_results(backtest_results, metrics)
+            self.result_logger.plot_results(backtest_results, metrics)
+            
+            # Reset suffix after saving
+            if subset_index is not None:
+                self.params.set(None, 'model', 'suffix')
+            
+            self.logger.info(f"Backtest completed successfully with execution ID: {execution_id}")
             return backtest_results, metrics
             
         except Exception as e:
             self.logger.error(f"Error during backtesting: {str(e)}")
             import traceback
-            self.logger.error(traceback.format_exc())
+            error_trace = traceback.format_exc()
+            self.logger.error(error_trace)
+            
+            # If we have a data context, record the error
+            if locals().get('data_context') is not None:
+                data_context.add_processing_step("backtest_error", {
+                    "error": str(e),
+                    "traceback": error_trace
+                })
+            
             return False
     
     def _run_quantum_backtest(self, df, probabilities, threshold=0.382, hedge_threshold=0.5):
