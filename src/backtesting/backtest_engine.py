@@ -73,6 +73,27 @@ class BacktestEngine:
         test_sets_path = self.params.get('backtesting', 'test_sets', 'path', default='data/test_sets')
         processed_path = self.params.get('data', 'processed', 'path', default='data/processed')
         
+        # Check if subset testing is requested
+        subset_str = self.params.get('backtesting', 'test_sets', 'subset', default=None)
+        subset_index = 0
+        subset_ratio = 1.0
+        
+        if subset_str:
+            self.logger.info(f"Subset testing requested: {subset_str}")
+            try:
+                # Parse subset string in format "n/m" (e.g., "1/10")
+                parts = subset_str.split('/')
+                if len(parts) == 2:
+                    subset_index = int(parts[0]) - 1  # Convert to 0-based index
+                    subset_ratio = 1.0 / float(parts[1])
+                    self.logger.info(f"Using subset {subset_index + 1} of {int(1/subset_ratio)} (size: {subset_ratio*100:.1f}%)")
+                else:
+                    self.logger.warning(f"Invalid subset format '{subset_str}'. Using full test set.")
+                    subset_str = None
+            except ValueError:
+                self.logger.warning(f"Invalid subset parameters in '{subset_str}'. Using full test set.")
+                subset_str = None
+    
         self.logger.info(f"Running backtest for {exchange} {symbol} {timeframe}")
         
         try:
@@ -85,6 +106,28 @@ class BacktestEngine:
                 self.logger.info(f"Using held-out test data from {test_file}")
                 df = pd.read_csv(test_file, index_col='timestamp', parse_dates=True)
                 data_source = "test_set"  # Track the data source
+                
+                # Apply subset if requested
+                if subset_str:
+                    # Sort by timestamp to ensure proper sequential subsetting
+                    df = df.sort_index()
+                    total_rows = len(df)
+                    subset_size = int(total_rows * subset_ratio)
+                    
+                    # Calculate subset boundaries
+                    start_idx = subset_index * subset_size
+                    end_idx = min(start_idx + subset_size, total_rows)
+                    
+                    if start_idx >= total_rows:
+                        self.logger.error(f"Subset index {subset_index + 1} is out of range for dataset with {total_rows} rows")
+                        return False
+                    
+                    # Extract the subset
+                    original_size = len(df)
+                    df = df.iloc[start_idx:end_idx]
+                    self.logger.info(f"Using subset {subset_index + 1}/{int(1/subset_ratio)} with {len(df)}/{original_size} samples")
+                    data_source = f"test_subset_{subset_index + 1}_of_{int(1/subset_ratio)}"
+                    
             else:
                 # Fall back to processed data with a warning
                 self.logger.warning(f"No test set found at {test_file}. Using processed data instead. "
@@ -98,6 +141,29 @@ class BacktestEngine:
                     
                 df = pd.read_csv(input_file, index_col='timestamp', parse_dates=True)
                 data_source = "full_data"  # Track the data source
+                
+                # Apply subset if requested on full data (with additional warning)
+                if subset_str:
+                    self.logger.warning("Applying subset selection to full data rather than test data could lead to inconsistent results")
+                    
+                    # Sort by timestamp for sequential subsetting
+                    df = df.sort_index()
+                    total_rows = len(df)
+                    subset_size = int(total_rows * subset_ratio)
+                    
+                    # Calculate subset boundaries
+                    start_idx = subset_index * subset_size
+                    end_idx = min(start_idx + subset_size, total_rows)
+                    
+                    if start_idx >= total_rows:
+                        self.logger.error(f"Subset index {subset_index + 1} is out of range for dataset with {total_rows} rows")
+                        return False
+                    
+                    # Extract the subset
+                    original_size = len(df)
+                    df = df.iloc[start_idx:end_idx]
+                    self.logger.info(f"Using subset {subset_index + 1}/{int(1/subset_ratio)} with {len(df)}/{original_size} samples")
+                    data_source = f"full_data_subset_{subset_index + 1}_of_{int(1/subset_ratio)}"
             
             # Load model through the model factory
             model_factory = ModelFactory(self.params)
@@ -124,8 +190,19 @@ class BacktestEngine:
             metrics['data_source'] = data_source
             
             # Save and plot results
-            self.result_logger.save_results(backtest_results, metrics)
-            self.result_logger.plot_results(backtest_results, metrics)
+            if subset_str:
+                metrics['subset_ratio'] = subset_ratio
+                metrics['subset_index'] = subset_index
+                metrics['subset_size'] = len(df)
+                
+                # Add subset identifier to output filenames
+                suffix = f"_subset_{subset_index + 1}_of_{int(1/subset_ratio)}"
+                params.set([suffix], 'model', 'suffix')
+                self.result_logger.save_results(backtest_results, metrics)
+                self.result_logger.plot_results(backtest_results, metrics)
+            else:
+                self.result_logger.save_results(backtest_results, metrics)
+                self.result_logger.plot_results(backtest_results, metrics)
             
             return backtest_results, metrics
             
@@ -135,7 +212,7 @@ class BacktestEngine:
             self.logger.error(traceback.format_exc())
             return False
     
-    def _run_quantum_backtest(self, df, probabilities, threshold=0.5, hedge_threshold=0.48):
+    def _run_quantum_backtest(self, df, probabilities, threshold=0.382, hedge_threshold=0.5):
         """
         Run backtest with quantum-inspired trading approach
         
@@ -158,6 +235,11 @@ class BacktestEngine:
             tuple: (df_backtest, metrics) - DataFrame with backtest results and performance statistics
         """
         df_backtest = df.copy()
+        threshold = self.params.get('backtesting', 'enter_threshold', default=threshold)
+        hedge_threshold = self.params.get('backtesting', 'hedge_threshold', default=hedge_threshold)
+        # Different thresholds for long and short
+        long_threshold = threshold
+        short_threshold = threshold*1.1382 # More conservative
         
         # Initialize columns for tracking positions and returns
         df_backtest['short_prob'] = probabilities[:, 0]  # Probability of short position
@@ -168,11 +250,21 @@ class BacktestEngine:
         df_backtest['exit_price'] = np.nan  # Price at position exit
         df_backtest['trade_return'] = np.nan  # Return of individual trades
         df_backtest['trade_duration'] = np.nan  # Duration of trades in bars
+    
+        # New columns for fee tracking
+        df_backtest['fee_impact'] = 0.0  # Fee amount for each trade
+        df_backtest['total_fees_paid'] = 0.0  # Running total of fees paid
+        df_backtest['closed_position_type'] = np.nan  # Type of closed position: long, short, hedged
+        
+        # Add column to track if position matches target (only if target exists in df)
+        if 'target' in df.columns:
+            df_backtest['target_match'] = False
         
         # Simulate trading
         position = 0  # Start with no position
         entry_idx = 0  # Index of entry bar
         entry_price = 0  # Price at entry
+        total_fees_paid = 0.0  # Track total fees paid
         
         for i in range(1, len(df_backtest) - 1):
             current_price = df_backtest['close'].iloc[i]
@@ -185,7 +277,7 @@ class BacktestEngine:
             # Update position based on current state and probabilities
             if position == 0:  # Currently flat
                 # Check for new position signals
-                if long_prob > threshold:
+                if long_prob > long_threshold:
                     # Enter long position when long probability exceeds threshold
                     position = 1
                     entry_idx = i
@@ -193,7 +285,7 @@ class BacktestEngine:
                     df_backtest.loc[df_backtest.index[i], 'position'] = 1
                     df_backtest.loc[df_backtest.index[i], 'entry_price'] = current_price
                 
-                elif short_prob > threshold:
+                elif short_prob > short_threshold:
                     # Enter short position when short probability exceeds threshold
                     position = -1
                     entry_idx = i
@@ -211,10 +303,18 @@ class BacktestEngine:
                     df_backtest.loc[df_backtest.index[i], 'position'] = 2
                     df_backtest.loc[df_backtest.index[i], 'entry_price'] = current_price
             
+                
+                # Record entry fee
+                entry_fee = self.fee_rate * abs(position)
+                total_fees_paid += entry_fee
+                df_backtest.loc[df_backtest.index[i], 'fee_impact'] = entry_fee
+                df_backtest.loc[df_backtest.index[i], 'total_fees_paid'] = total_fees_paid
+                
             elif position == 1:  # Currently long
                 # Check for exit or hedge signals
-                if long_prob < self.exit_threshold or short_prob > threshold:
+                if long_prob < self.exit_threshold or short_prob > short_threshold:
                     # Exit long position if long probability drops or short probability rises
+                    df_backtest.loc[df_backtest.index[i], 'closed_position_type'] = position
                     df_backtest.loc[df_backtest.index[i], 'exit_price'] = current_price
                     df_backtest.loc[df_backtest.index[i], 'position'] = 0
                     
@@ -223,22 +323,43 @@ class BacktestEngine:
                     trade_return = (current_price / entry_price) - 1 - (self.fee_rate * 2)
                     df_backtest.loc[df_backtest.index[i], 'trade_return'] = trade_return
                     df_backtest.loc[df_backtest.index[i], 'trade_duration'] = i - entry_idx
+                
+                    # Calculate exit fee
+                    exit_fee = self.fee_rate
+                    total_fees_paid += exit_fee
+                
+                    # Record fee impact for this exit
+                    df_backtest.loc[df_backtest.index[i], 'fee_impact'] = exit_fee
+                    df_backtest.loc[df_backtest.index[i], 'total_fees_paid'] = total_fees_paid
                     
                     # Check for immediate reversal to short
-                    if short_prob > threshold:
+                    if short_prob > short_threshold:
                         # If short signal is strong, immediately enter short position
                         position = -1
                         entry_idx = i
                         entry_price = current_price
                         df_backtest.loc[df_backtest.index[i], 'position'] = -1
                         df_backtest.loc[df_backtest.index[i], 'entry_price'] = current_price
+                    
+                        # Add entry fee for new short position
+                        reversal_fee = self.fee_rate
+                        total_fees_paid += reversal_fee
+                        df_backtest.loc[df_backtest.index[i], 'fee_impact'] += reversal_fee
+                        df_backtest.loc[df_backtest.index[i], 'total_fees_paid'] = total_fees_paid
                     else:
                         position = 0
                 
-                elif short_prob > hedge_threshold:
+                elif long_prob > hedge_threshold and short_prob > hedge_threshold:
                     # Add hedge to long position if short signal strengthens
+                    df_backtest.loc[df_backtest.index[i], 'entry_price'] = current_price
                     position = 2  # Hedged
                     df_backtest.loc[df_backtest.index[i], 'position'] = 2
+                
+                    # Record fee for adding the short hedge
+                    hedge_fee = self.fee_rate
+                    total_fees_paid += hedge_fee
+                    df_backtest.loc[df_backtest.index[i], 'fee_impact'] = hedge_fee
+                    df_backtest.loc[df_backtest.index[i], 'total_fees_paid'] = total_fees_paid
                 
                 else:
                     # Stay in long position if no exit signals
@@ -246,8 +367,9 @@ class BacktestEngine:
             
             elif position == -1:  # Currently short
                 # Check for exit or hedge signals
-                if short_prob < self.exit_threshold or long_prob > threshold:
+                if short_prob < self.exit_threshold or long_prob > long_threshold:
                     # Exit short position if short probability drops or long probability rises
+                    df_backtest.loc[df_backtest.index[i], 'closed_position_type'] = position
                     df_backtest.loc[df_backtest.index[i], 'exit_price'] = current_price
                     df_backtest.loc[df_backtest.index[i], 'position'] = 0
                     
@@ -256,22 +378,43 @@ class BacktestEngine:
                     trade_return = 1 - (current_price / entry_price) - (self.fee_rate * 2)
                     df_backtest.loc[df_backtest.index[i], 'trade_return'] = trade_return
                     df_backtest.loc[df_backtest.index[i], 'trade_duration'] = i - entry_idx
+                
+                    # Calculate exit fee
+                    exit_fee = self.fee_rate
+                    total_fees_paid += exit_fee
+                
+                    # Record fee impact for this exit
+                    df_backtest.loc[df_backtest.index[i], 'fee_impact'] = exit_fee
+                    df_backtest.loc[df_backtest.index[i], 'total_fees_paid'] = total_fees_paid
                     
                     # Check for immediate reversal to long
-                    if long_prob > threshold:
+                    if long_prob > long_threshold:
                         # If long signal is strong, immediately enter long position
                         position = 1
                         entry_idx = i
                         entry_price = current_price
                         df_backtest.loc[df_backtest.index[i], 'position'] = 1
                         df_backtest.loc[df_backtest.index[i], 'entry_price'] = current_price
+                    
+                        # Add entry fee for new long position
+                        reversal_fee = self.fee_rate
+                        total_fees_paid += reversal_fee
+                        df_backtest.loc[df_backtest.index[i], 'fee_impact'] += reversal_fee
+                        df_backtest.loc[df_backtest.index[i], 'total_fees_paid'] = total_fees_paid
                     else:
                         position = 0
                 
-                elif long_prob > hedge_threshold:
+                elif long_prob > hedge_threshold and short_prob > hedge_threshold:
                     # Add hedge to short position if long signal strengthens
+                    df_backtest.loc[df_backtest.index[i], 'entry_price'] = current_price
                     position = 2  # Hedged
                     df_backtest.loc[df_backtest.index[i], 'position'] = 2
+                
+                    # Record fee for adding the long hedge
+                    hedge_fee = self.fee_rate
+                    total_fees_paid += hedge_fee
+                    df_backtest.loc[df_backtest.index[i], 'fee_impact'] = hedge_fee
+                    df_backtest.loc[df_backtest.index[i], 'total_fees_paid'] = total_fees_paid
                 
                 else:
                     # Stay in short position if no exit signals
@@ -281,6 +424,7 @@ class BacktestEngine:
                 # Check for removing hedge
                 if long_prob < hedge_threshold and short_prob < hedge_threshold:
                     # Exit hedged position if both signals weaken
+                    df_backtest.loc[df_backtest.index[i], 'closed_position_type'] = position
                     df_backtest.loc[df_backtest.index[i], 'exit_price'] = current_price
                     df_backtest.loc[df_backtest.index[i], 'position'] = 0
                     
@@ -289,18 +433,58 @@ class BacktestEngine:
                     trade_return = -(self.fee_rate * 4)  # Approximate cost of hedging
                     df_backtest.loc[df_backtest.index[i], 'trade_return'] = trade_return
                     df_backtest.loc[df_backtest.index[i], 'trade_duration'] = i - entry_idx
+                
+                    # Calculate exit fee (double fee to exit both positions)
+                    exit_fee = self.fee_rate * 2
+                    total_fees_paid += exit_fee
+                
+                    # Record fee impact for this exit
+                    df_backtest.loc[df_backtest.index[i], 'fee_impact'] = exit_fee
+                    df_backtest.loc[df_backtest.index[i], 'total_fees_paid'] = total_fees_paid
                     
                     position = 0
                 
                 elif long_prob > threshold and short_prob < hedge_threshold:
                     # Convert hedge to pure long if long signal strengthens and short weakens
+                    df_backtest.loc[df_backtest.index[i], 'closed_position_type'] = -1
+                    df_backtest.loc[df_backtest.index[i], 'exit_price'] = current_price
                     position = 1
                     df_backtest.loc[df_backtest.index[i], 'position'] = 1
                 
-                elif short_prob > threshold and long_prob < hedge_threshold:
+                    # Fee for exiting the short side
+                    exit_fee = self.fee_rate
+                    total_fees_paid += exit_fee
+                    df_backtest.loc[df_backtest.index[i], 'fee_impact'] = exit_fee
+                    df_backtest.loc[df_backtest.index[i], 'total_fees_paid'] = total_fees_paid
+    
+                    # Calculate return from closing the short side of the hedge
+                    # Short return = 1 - (exit price / entry price) - exit fee
+                    short_side_return = 1 - (current_price / entry_price) - (self.fee_rate * 2)
+    
+                    # Record partial close trade return (only for short side)
+                    df_backtest.loc[df_backtest.index[i], 'trade_return'] = short_side_return
+                    df_backtest.loc[df_backtest.index[i], 'trade_duration'] = i - entry_idx
+                
+                elif short_prob > short_threshold and long_prob < hedge_threshold:
                     # Convert hedge to pure short if short signal strengthens and long weakens
+                    df_backtest.loc[df_backtest.index[i], 'closed_position_type'] = 1
+                    df_backtest.loc[df_backtest.index[i], 'exit_price'] = current_price
                     position = -1
                     df_backtest.loc[df_backtest.index[i], 'position'] = -1
+                
+                    # Fee for exiting the long side
+                    exit_fee = self.fee_rate
+                    total_fees_paid += exit_fee
+                    df_backtest.loc[df_backtest.index[i], 'fee_impact'] = exit_fee
+                    df_backtest.loc[df_backtest.index[i], 'total_fees_paid'] = total_fees_paid
+    
+                    # Calculate return from closing the long side of the hedge
+                    # Long return = (exit price / entry price) - 1 - exit fee
+                    long_side_return = (current_price / entry_price) - 1 - (self.fee_rate * 2)
+                    
+                    # Record partial close trade return (only for long side)
+                    df_backtest.loc[df_backtest.index[i], 'trade_return'] = long_side_return
+                    df_backtest.loc[df_backtest.index[i], 'trade_duration'] = i - entry_idx
                 
                 else:
                     # Stay hedged if signals remain conflicted
@@ -310,6 +494,7 @@ class BacktestEngine:
         if position != 0:
             i = len(df_backtest) - 1
             current_price = df_backtest['close'].iloc[i]
+            df_backtest.loc[df_backtest.index[i], 'closed_position_type'] = position
             df_backtest.loc[df_backtest.index[i], 'exit_price'] = current_price
             
             if position == 1:  # Long position
@@ -319,36 +504,72 @@ class BacktestEngine:
             else:  # Hedged position
                 trade_return = -(self.fee_rate * 4)  # Approximate cost of hedging
             
+            exit_fee = self.fee_rate * abs(position)
+            
+            # Record final trade details
+            total_fees_paid += exit_fee
+            
+            df_backtest.loc[df_backtest.index[i], 'fee_impact'] = exit_fee
+            df_backtest.loc[df_backtest.index[i], 'total_fees_paid'] = total_fees_paid
             df_backtest.loc[df_backtest.index[i], 'trade_return'] = trade_return
             df_backtest.loc[df_backtest.index[i], 'trade_duration'] = i - entry_idx
         
-        # Calculate strategy returns
-        df_backtest['returns'] = df_backtest['close'].pct_change()
+        # Initialize strategy returns
+        df_backtest['bar_return'] = 0.0
         
-        # For simplicity, we'll just use position values (-1, 0, 1, 2) directly
-        # For position=2 (hedged), we assume the return is approximately zero minus fees
-        df_backtest['strategy_returns'] = 0.0
-        
-        long_mask = df_backtest['position'].shift(1) == 1
-        short_mask = df_backtest['position'].shift(1) == -1
-        hedged_mask = df_backtest['position'].shift(1) == 2
-        
-        df_backtest.loc[long_mask, 'strategy_returns'] = df_backtest.loc[long_mask, 'returns']
-        df_backtest.loc[short_mask, 'strategy_returns'] = -df_backtest.loc[short_mask, 'returns']
-        df_backtest.loc[hedged_mask, 'strategy_returns'] = 0  # Approximate hedged return as 0
+        # Apply realized returns from closed trades
+        exit_mask = ~df_backtest['trade_return'].isna()
+        df_backtest.loc[exit_mask, 'bar_return'] = df_backtest.loc[exit_mask, 'trade_return']
         
         # Calculate cumulative returns
+        df_backtest['returns'] = df_backtest['close'].pct_change()
         df_backtest['cumulative_returns'] = (1 + df_backtest['returns']).cumprod() - 1
-        df_backtest['strategy_cumulative'] = (1 + df_backtest['strategy_returns']).cumprod() - 1
+        df_backtest['strategy_cumulative'] = (1 + df_backtest['bar_return']).cumprod() - 1
+    
+        # Calculate fee drag ratio (cumulative fees / gross strategy value)
+        if df_backtest['strategy_cumulative'].iloc[-1] > 0:
+            gross_portfolio_value = 1 + df_backtest['strategy_cumulative'].iloc[-1]
+            overall_fee_drag = total_fees_paid / gross_portfolio_value
+        else:
+            overall_fee_drag = 0.0
         
         # Calculate trading statistics
         trades = df_backtest[~df_backtest['trade_return'].isna()]
+
+        # Count hedged positions (position=2) as both long and short 
+        hedged_trades_count = len(trades[trades['closed_position_type'] == 2])
+        
+        # Calculate prediction accuracy if target exists
+        if 'target' in df.columns:
+            # For each step, check if position matches target
+            for i in range(len(df_backtest)):
+                # Get target and position, default to 0 if target is NaN
+                target_val = df['target'].iloc[i] if not pd.isna(df['target'].iloc[i]) else 0
+                position_val = df_backtest['position'].iloc[i]
+                
+                # Check if they match (only considering standard positions, not hedged)
+                if position_val == target_val and position_val != 2:  # Ignore hedged positions (2)
+                    df_backtest.loc[df_backtest.index[i], 'target_match'] = True
+            
+            # Calculate overall accuracy
+            valid_samples = df_backtest[~df['target'].isna()]
+            if len(valid_samples) > 0:
+                target_accuracy = valid_samples['target_match'].mean()
+                
+                # Calculate class-specific accuracy
+                class_accuracy = {}
+                for target_value in [-1, 0, 1]:
+                    target_class = valid_samples[df['target'] == target_value]
+                    if len(target_class) > 0:
+                        class_match = target_class['target_match'].mean()
+                        class_accuracy[f'target_{target_value}_accuracy'] = class_match
+                        class_accuracy[f'target_{target_value}_count'] = len(target_class)
         
         metrics = {
             'total_trades': len(trades),
-            'long_trades': (trades['position'] == 1).sum(),
-            'short_trades': (trades['position'] == -1).sum(),
-            'hedged_trades': (trades['position'] == 2).sum(),
+            'long_trades': len(trades[trades['closed_position_type'] == 1]) + hedged_trades_count,
+            'short_trades': len(trades[trades['closed_position_type'] == -1]) + hedged_trades_count,
+            'hedged_trades': hedged_trades_count,
             'win_rate': (trades['trade_return'] > 0).mean() if len(trades) > 0 else 0,
             'avg_win': trades.loc[trades['trade_return'] > 0, 'trade_return'].mean() 
                         if (trades['trade_return'] > 0).any() else 0,
@@ -359,8 +580,18 @@ class BacktestEngine:
                                 if (trades['trade_return'] < 0).any() and 
                                     (trades['trade_return'] > 0).any() else float('inf'),
             'avg_trade_duration': trades['trade_duration'].mean() if len(trades) > 0 else 0,
-            'final_return': df_backtest['strategy_cumulative'].iloc[-1]
+            'total_fees_paid': total_fees_paid,
+            'total_fee_drag': overall_fee_drag,
+            'final_return': df_backtest['strategy_cumulative'].iloc[-1],
+            'target_match_accuracy': target_accuracy,
+            'target_class_accuracy': class_accuracy
         }
+        
+        # Log the accuracy
+        self.logger.info(f"Position to target match accuracy: {target_accuracy:.2%}")
+        for k, v in class_accuracy.items():
+            if 'accuracy' in k:
+                self.logger.info(f"{k}: {v:.2%}")
         
         return df_backtest, metrics
         
@@ -820,4 +1051,173 @@ class BacktestEngine:
         except Exception as e:
             self.logger.error(f"Error creating position sizing summary plots: {str(e)}")
             # Continue execution even if plotting fails
+            return False
+        
+    def run_target_backtest(self):
+        """
+        Run a backtest using the actual targets rather than model predictions.
+        
+        This provides an "upper bound" of model performance - what would happen 
+        if predictions were perfect. Useful for validating target quality and
+        the trading strategy logic.
+        
+        Returns:
+            tuple or bool: (backtest_results, metrics) if successful, False otherwise
+        """
+        params = self.params
+        exchange = params.get('data', 'exchanges', 0)
+        symbol = params.get('data', 'symbols', 0)
+        timeframe = params.get('data', 'timeframes', 0)
+        test_sets_path = self.params.get('backtesting', 'test_sets', 'path', default='data/test_sets')
+        processed_path = self.params.get('data', 'processed', 'path', default='data/processed')
+        
+        self.logger.info(f"Running target quality backtest for {exchange} {symbol} {timeframe}")
+        
+        try:
+            # Check for test data first
+            symbol_safe = symbol.replace('/', '_')
+            test_file = Path(f"{test_sets_path}/{exchange}/{symbol_safe}/{timeframe}_test.csv")
+            
+            # If test data exists, use it
+            if test_file.exists():
+                self.logger.info(f"Using held-out test data from {test_file}")
+                df = pd.read_csv(test_file, index_col='timestamp', parse_dates=True)
+                data_source = "test_set"
+            else:
+                # Fall back to processed data with a warning
+                self.logger.warning(f"No test set found at {test_file}. Using processed data instead.")
+                
+                input_file = Path(f"{processed_path}/{exchange}/{symbol_safe}/{timeframe}.csv")
+                
+                if not input_file.exists():
+                    self.logger.error(f"No processed data file found at {input_file}")
+                    return False
+                    
+                df = pd.read_csv(input_file, index_col='timestamp', parse_dates=True)
+                data_source = "full_data"
+            
+            # Make sure the dataframe is sorted by timestamp
+            df = df.sort_index()
+            
+            # Verify that target exists in the DataFrame
+            if 'target' not in df.columns:
+                self.logger.error("Missing 'target' column in data")
+                return False
+            
+            # Create "perfect predictions" from the actual targets
+            # Convert from single target column (-1, 0, 1) to probability array format
+            probabilities = np.zeros((len(df), 3))
+            
+            # For each row, set probability=1.0 for the correct class
+            for i in range(len(df)):
+                target_val = df['target'].iloc[i]
+                if target_val == -1:  # Short
+                    probabilities[i, 0] = 1.0
+                elif target_val == 0:  # No trade
+                    probabilities[i, 1] = 1.0
+                elif target_val == 1:  # Long
+                    probabilities[i, 2] = 1.0
+        
+            # Let's add a histogram of the probabilities we're using
+            target_counts = df['target'].value_counts()
+            self.logger.info(f"Target distribution before running backtest: {target_counts.to_dict()}")
+            
+            # Run backtest with "perfect" predictions
+            backtest_results, metrics = self._run_quantum_backtest(df, probabilities)
+        
+            # Add data source and label this as a target backtest
+            metrics['data_source'] = data_source
+            metrics['backtest_type'] = 'target_quality'
+            metrics['strategy_type'] = 'quantum'
+        
+            # Add diagnostics to help identify the discrepancy between targets and trades
+            # 1. Count transitions where strategy didn't follow perfect signals
+            trade_mismatch = 0
+            signal_ignored = 0
+            expected_trades = 0
+            signal_followed = 0
+            
+            for i in range(1, len(df)):
+                # Get the target and actual position
+                target = df['target'].iloc[i]
+                position = backtest_results['position'].iloc[i]
+                
+                # Check if we expect a trade here
+                if target != 0:  # Should be in a position
+                    expected_trades += 1
+                    
+                    if (target == 1 and position == 1) or (target == -1 and position == -1):
+                        signal_followed += 1
+                    elif position == 0:
+                        signal_ignored += 1
+                    else:
+                        trade_mismatch += 1  # Position doesn't match target
+            
+            metrics['expected_trades'] = expected_trades
+            metrics['signal_followed'] = signal_followed
+            metrics['signal_ignored'] = signal_ignored
+            metrics['trade_mismatch'] = trade_mismatch
+            
+            # Calculate trade efficiency
+            if expected_trades > 0:
+                metrics['target_efficiency'] = signal_followed / expected_trades
+            else:
+                metrics['target_efficiency'] = 0
+                
+            # More detailed diagnostics on position transitions
+            if 'position' in backtest_results.columns:
+                position_changes = (backtest_results['position'] != backtest_results['position'].shift(1)).sum()
+                metrics['position_changes'] = position_changes
+                
+                # Check position stability - how often positions match targets
+                target_position_match = ((df['target'] == 1) & (backtest_results['position'] == 1)) | \
+                                        ((df['target'] == -1) & (backtest_results['position'] == -1)) | \
+                                        ((df['target'] == 0) & (backtest_results['position'] == 0))
+                metrics['target_position_match_rate'] = target_position_match.mean()
+        
+            # DIAGNOSTIC: Check position distribution in trades
+            trades = backtest_results[~backtest_results['trade_return'].isna()]
+            position_counts = trades['position'].value_counts().to_dict()
+            self.logger.info(f"Target backtest position distribution: {position_counts}")
+            
+            # Check for unaccounted positions
+            known_positions = [1, -1, 0, 2]  # Expected position values
+            unknown_positions = [pos for pos in position_counts.keys() if pos not in known_positions]
+            if unknown_positions:
+                self.logger.warning(f"Found trades with unexpected position values: {unknown_positions}")
+                for pos in unknown_positions:
+                    metrics[f'unknown_pos_{pos}_trades'] = position_counts.get(pos, 0)
+            
+            # DIAGNOSTIC: Check target distribution vs trade counts
+            target_counts = df['target'].value_counts().to_dict()
+            self.logger.info(f"Target distribution in data: {target_counts}")
+            self.logger.info(f"Trade counts in backtest: long={metrics.get('long_trades', 0)}, " + 
+                                f"short={metrics.get('short_trades', 0)}, no_trade=N/A")
+            
+            # Save and plot results
+            self.result_logger.save_results(backtest_results, metrics)
+            self.result_logger.plot_results(backtest_results, metrics)
+            
+            # Deep dive into the trades with low win rate
+            losing_trades = backtest_results[(backtest_results['trade_return'] < 0) & (~backtest_results['trade_return'].isna())]
+            
+            # Sample a few losing trades for inspection
+            sample_losing = losing_trades.head(5)
+            
+            self.logger.info("Sample of losing trades:")
+            for idx, row in sample_losing.iterrows():
+                target = df.loc[idx, 'target']
+                pos = row['position']
+                entry = row['entry_price']
+                exit_p = row['exit_price']
+                ret = row['trade_return']
+                
+                self.logger.info(f"Target: {target}, Position: {pos}, Entry: {entry}, Exit: {exit_p}, Return: {ret:.4f}")
+            
+            return backtest_results, metrics
+            
+        except Exception as e:
+            self.logger.error(f"Error during target backtest: {str(e)}")
+            import traceback
+            self.logger.error(traceback.format_exc())
             return False

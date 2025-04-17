@@ -64,7 +64,7 @@ class FeatureEngineer:
                         # Check if we have enough data
                         min_rows = self.params.get('data', 'min_rows', default=100)
                         if len(df) < min_rows:
-                            self.logger.warning(f"Not enough data for {symbol} {timeframe} ({len(df)} rows < {min_rows})")
+                            self.logger.warning(f"Not enough data for {symbol} {timeframe} ({len(df)} rows < {min_rows}) at {exchange}")
                             continue
                         
                         # Generate features
@@ -72,7 +72,7 @@ class FeatureEngineer:
                         
                         # Quality check
                         if df_featured is None or len(df_featured) == 0:
-                            self.logger.error(f"Feature generation returned empty DataFrame for {symbol} {timeframe}")
+                            self.logger.error(f"Feature generation returned empty DataFrame for {symbol} {timeframe} at {exchange}")
                             error_count += 1
                             continue
                         
@@ -109,13 +109,13 @@ class FeatureEngineer:
             df = df.copy()
             
             # Get feature configuration
-            include_returns = self.params.get('features', 'include_returns', default=True)
-            include_volatility = self.params.get('features', 'include_volatility', default=True)
-            include_bb = self.params.get('features', 'include_bb', default=True)
-            include_rsi = self.params.get('features', 'include_rsi', default=True)
-            include_macd = self.params.get('features', 'include_macd', default=True)
-            include_trend = self.params.get('features', 'include_trend', default=True)
-            include_volume = self.params.get('features', 'include_volume', default=True)
+            include_returns = self.params.get('model', 'features', 'include_returns', default=True)
+            include_volatility = self.params.get('model', 'features', 'include_volatility', default=True)
+            include_bb = self.params.get('model', 'features', 'include_bb', default=True)
+            include_rsi = self.params.get('model', 'features', 'include_rsi', default=True)
+            include_macd = self.params.get('model', 'features', 'include_macd', default=True)
+            include_trend = self.params.get('model', 'features', 'include_trend', default=True)
+            include_volume = self.params.get('model', 'features', 'include_volume', default=True)
             
             # Price and returns
             df['returns'] = df['close'].pct_change()
@@ -123,19 +123,19 @@ class FeatureEngineer:
             
             # Volatility measures
             if include_volatility:
-                window = self.params.get('features', 'volatility_window', default=20)
+                window = self.params.get('model', 'features', 'volatility_window', default=20)
                 df['volatility'] = df['returns'].rolling(window=window).std()
                 df['range'] = (df['high'] - df['low']) / df['close']
                 
                 # Calculate ATR
-                atr_length = self.params.get('features', 'atr_length', default=14)
+                atr_length = self.params.get('model', 'features', 'atr_length', default=14)
                 atr = ta.atr(df['high'], df['low'], df['close'], length=atr_length)
                 df = df.join(atr)
             
             # Bollinger Bands
             if include_bb:
-                bb_length = self.params.get('features', 'bb_length', default=20)
-                bb_std = self.params.get('features', 'bb_std', default=2.0)
+                bb_length = self.params.get('model', 'features', 'bb_length', default=20)
+                bb_std = self.params.get('model', 'features', 'bb_std', default=2.0)
                 bb = ta.bbands(df['close'], length=bb_length, std=bb_std)
                 df = df.join(bb)
                 df['bb_pos'] = (df['close'] - df[f'BBL_{bb_length}_{bb_std}']) / (df[f'BBU_{bb_length}_{bb_std}'] - df[f'BBL_{bb_length}_{bb_std}'])
@@ -143,41 +143,81 @@ class FeatureEngineer:
             
             # RSI
             if include_rsi:
-                rsi_length = self.params.get('features', 'rsi_length', default=14)
+                rsi_length = self.params.get('model', 'features', 'rsi_length', default=14)
                 rsi = ta.rsi(df['close'], length=rsi_length)
                 df = df.join(rsi)
                 df['rsi_diff'] = df[f'RSI_{rsi_length}'].diff()
             
             # MACD
             if include_macd:
-                macd_fast = self.params.get('features', 'macd_fast', default=12)
-                macd_slow = self.params.get('features', 'macd_slow', default=26)
-                macd_signal = self.params.get('features', 'macd_signal', default=9)
+                macd_fast = self.params.get('model', 'features', 'macd_fast', default=12)
+                macd_slow = self.params.get('model', 'features', 'macd_slow', default=26)
+                macd_signal = self.params.get('model', 'features', 'macd_signal', default=9)
                 macd = ta.macd(df['close'], fast=macd_fast, slow=macd_slow, signal=macd_signal)
                 df = df.join(macd)
                 df['macd_hist_diff'] = df[f'MACDh_{macd_fast}_{macd_slow}_{macd_signal}'].diff()
             
             # Moving Averages and Trend
             if include_trend:
-                ema_short = self.params.get('features', 'ema_short', default=9)
-                ema_long = self.params.get('features', 'ema_long', default=50)
+                ema_short = self.params.get('model', 'features', 'ema_short', default=9)
+                ema_long = self.params.get('model', 'features', 'ema_long', default=50)
                 df[f'ema{ema_short}'] = ta.ema(df['close'], length=ema_short)
                 df[f'ema{ema_long}'] = ta.ema(df['close'], length=ema_long)
                 df['trend_strength'] = (df[f'ema{ema_short}'] - df[f'ema{ema_long}']) / df[f'ema{ema_long}']
             
             # Volume indicators
             if include_volume:
-                volume_window = self.params.get('features', 'volume_window', default=20)
+                volume_window = self.params.get('model', 'features', 'volume_window', default=20)
                 df['volume_ma'] = df['volume'].rolling(window=volume_window).mean()
                 df['volume_ratio'] = df['volume'] / df['volume_ma']
             
             # Optional advanced features
-            if self.params.get('features', 'include_advanced', default=False):
+            if self.params.get('model', 'features', 'include_advanced', default=False):
                 self._add_advanced_features(df)
             
             # Generate feature metadata if requested
-            if self.params.get('features', 'generate_metadata', default=False):
+            if self.params.get('model', 'features', 'generate_metadata', default=False):
                 self._generate_feature_metadata(df)
+                
+            # Support/Resistance features
+            if self.params.get('model', 'features', 'include_sr', default=False):
+                # Use single or multiple lookback periods based on params
+                lookbacks = self.params.get('model', 'features', 'sr_lookbacks', default=[50])
+                if not isinstance(lookbacks, list):
+                    lookbacks = [lookbacks]  # Convert single value to list
+                
+                # Add minimal set of S/R features
+                for lb in lookbacks:
+                    # Calculate resistance and support levels
+                    df[f'resistance_{lb}'] = df['high'].rolling(lb).max()
+                    df[f'support_{lb}'] = df['low'].rolling(lb).min()
+                    
+                    # Distance to levels (normalized by ATR)
+                    # If ATR already calculated, use it, otherwise calculate it
+                    atr_col = 'ATR_14' if 'ATR_14' in df.columns else None
+                    if atr_col is None:
+                        # Calculate ATR if not already present
+                        atr_length = self.params.get('model', 'features', 'atr_length', default=14)
+                        if f'ATR_{atr_length}' not in df.columns:
+                            atr = ta.atr(df['high'], df['low'], df['close'], length=atr_length)
+                            if isinstance(atr, pd.Series):
+                                atr.name = f'ATR_{atr_length}'
+                                df[f'ATR_{atr_length}'] = atr
+                            else:
+                                # If it returns a DataFrame, merge it carefully
+                                for col in atr.columns:
+                                    new_col_name = col.replace('ATRr_', 'ATR_')
+                                    df[new_col_name] = atr[col]
+                        atr_col = f'ATR_{atr_length}'
+                    
+                    # Calculate normalized distances
+                    df[f'dist_to_resistance_{lb}'] = (df[f'resistance_{lb}'] - df['close']) / df[atr_col]
+                    df[f'dist_to_support_{lb}'] = (df['close'] - df[f'support_{lb}']) / df[atr_col]
+                    
+                    # Optional breakout signals
+                    if self.params.get('model', 'features', 'include_sr_breakouts', default=True):
+                        df[f'resistance_break_{lb}'] = (df['close'] > df[f'resistance_{lb}'].shift(1)).astype(float)
+                        df[f'support_break_{lb}'] = (df['close'] < df[f'support_{lb}'].shift(1)).astype(float)
             
             # Drop NaN values
             df.dropna(inplace=True)

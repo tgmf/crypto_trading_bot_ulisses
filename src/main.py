@@ -53,7 +53,7 @@ def parse_args():
     
     # Command to execute
     parser.add_argument('command', type=str, 
-                        choices=['train', 'backtest', 'collect-data', 'incremental', 
+                        choices=['train', 'backtest', 'target-backtest', 'collect-data', 'incremental', 
                                 'continue-train', 'live', 'paper'],
                         help='Command to execute')
     
@@ -95,14 +95,15 @@ def parse_args():
                         help='Resume incremental training from chunk index')
     
     # Backtesting parameters
-    parser.add_argument('--walk-forward', action='store_true',
-                        help='Use walk-forward testing for backtesting')
-    parser.add_argument('--position-sizing', action='store_true',
-                        help='Use quantum-inspired position sizing for backtesting')
+    parser.add_argument('--strategy', type=str,
+                        choices=['quantum', 'position-sizing'],
+                        help='Specify strategy type to use')
     parser.add_argument('--no-trade-threshold', type=float,
                         help='Threshold for no-trade probability')
     parser.add_argument('--min-position-change', type=float,
                         help='Minimum position change to avoid fee churn')
+    parser.add_argument('--subset', type=str,
+                        help='part of a test set to use for backtesting, e.g 2/10 is 2nd part of 10')
     
     return parser.parse_args()
 
@@ -229,8 +230,8 @@ def main():
         
     elif command == 'backtest':
         # Create the appropriate tester based on command-line arguments
-        use_walk_forward = params.get('backtesting', 'use_walk_forward', default=False)
-        use_position_sizing = params.get('backtesting', 'use_position_sizing', default=False)
+        use_walk_forward = params.get('strategy', 'type') == 'walk-forward'
+        use_position_sizing = params.get('strategy', 'type') == 'position-sizing'
         
         if use_walk_forward:
             tester = WalkForwardTester(params)
@@ -255,7 +256,35 @@ def main():
                 tester.run_multi_test()
             else:
                 tester.run_test() # Run the backtest on a single symbol/timeframe
-                
+    
+    elif command == 'target-backtest':
+        # Create the appropriate tester based on command-line arguments
+        use_walk_forward = params.get('strategy', 'type') == 'walk-forward'
+        use_position_sizing = params.get('strategy', 'type') == 'position-sizing'
+        
+        if use_walk_forward:
+            logger.info("Walk-forward target testing still under constructiom") #TODO: Implement walk-forward target testing
+        
+        tester = BacktestEngine(params)
+        if use_position_sizing:
+            no_trade_threshold = params.get('backtesting', 'no_trade_threshold')
+            min_position_change = params.get('backtesting', 'min_position_change')
+            
+            logger.info(f"Backtesting targets with position sizing with threshold={no_trade_threshold}, min_change={min_position_change}")
+            
+            # Run with position sizing
+            if len(symbols) > 1 or len(timeframes) > 1:
+                logger.info("Target backtesting with multiple symbols/timeframes still under construction") #TODO: Implement multi-symbol target backtesting
+            tester.run_target_position_sizing_backtest()
+            
+        else:
+            # Standard target backtesting
+            if len(symbols) > 1 or len(timeframes) > 1:
+                logger.info("Target backtesting with multiple symbols/timeframes still under construction") #TODO: Implement multi-symbol target backtesting
+            
+            tester.run_target_backtest()
+        
+        
     elif command == 'paper':
         logger.info("Paper trading mode not yet implemented")  # Log that paper trading is not implemented
     elif command == 'live':

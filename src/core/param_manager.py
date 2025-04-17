@@ -88,15 +88,19 @@ class ParamManager:
         env_config = f"config/environment/{environment}.yaml"
         self._load_from_config(env_config)
         
-        # 3. Load modular configurations based on CLI arguments
+        # 3. Load modular configurations based on base.yaml settings 
+        # (if no CLI arguments override them)
+        self._load_modular_configs_from_base()
+        
+        # 4. Load modular configurations based on CLI arguments
         if cli_args:
             self._load_modular_configs_from_cli(cli_args)
         
-        # 4. Load environment variables
+        # 5. Load environment variables
         if env_vars:
             self._load_from_env()
         
-        # 5. Load remaining CLI arguments
+        # 6. Load remaining CLI arguments
         if cli_args:
             self._load_from_cli(cli_args)
             
@@ -136,6 +140,73 @@ class ParamManager:
         except Exception as e:
             self.logger.error(f"Failed to load config from {config_path}: {e}")
             
+    def _load_modular_configs_from_base(self):
+        """
+        Dynamically load ALL modular configurations based on base.yaml settings.
+        
+        This method scans the entire config structure and loads all applicable
+        module configs based on parameters defined in base.yaml.
+        
+        It handles any parameter that follows the pattern:
+        - parameter.type = 'value'
+        
+        And looks for corresponding config files in:
+        - config/parameters/value.yaml
+        """
+        # Get available configurations
+        available_configs = self.discover_available_configs()
+    
+        # Flatten the parameter structure for easier matching
+        flattened_params = self.flatten()
+    
+        # Process each available config directory
+        for module_dir, yaml_files in available_configs.items():
+            # Skip base and environment configs - they're handled separately
+            if module_dir in ['base', 'environment']:
+                continue
+            
+            # Convert module directory to parameter prefix
+            # For example: 'models' -> 'model', 'strategies' -> 'strategy'
+            param_prefix = module_dir[:-1] if module_dir.endswith('s') else module_dir
+        
+            # Look for a parameter that specifies which config to load
+            param_key = f"{param_prefix}.type"
+            
+            if param_key in flattened_params:
+                module_value = flattened_params[param_key]
+                self.logger.debug(f"Found parameter {param_key}={module_value} - looking for config file")
+                
+                # Try to find a matching config file
+                possible_filenames = [
+                    f"{module_value}.yaml",
+                    f"{module_value.lower()}.yaml" if isinstance(module_value, str) else f"{module_value}.yaml",
+                    f"{module_value.replace('-', '_')}.yaml" if isinstance(module_value, str) else f"{module_value}.yaml"
+                ]
+                
+                config_file = None
+                for filename in possible_filenames:
+                    if filename in yaml_files:
+                        config_file = Path('config') / module_dir / filename
+                        break
+                        
+                # Load the config if found
+                if config_file and config_file.exists():
+                    self.logger.info(f"Loading module config: {config_file}")
+                    self._load_from_config(config_file)
+                else:
+                    self.logger.debug(f"No config file found for {param_key}={module_value} in {module_dir}/")
+            else:
+                # Look for direct parameter match with module name
+                # For example: if there's a 'data' parameter and 'data' module directory
+                if param_prefix in self.params:
+                    # Try to find default config
+                    if 'default.yaml' in yaml_files:
+                        config_file = Path('config') / module_dir / 'default.yaml'
+                        self.logger.info(f"Loading default config for {param_prefix}: {config_file}")
+                        self._load_from_config(config_file)
+                        
+        self.logger.debug("Loaded all modular configurations from base config")
+            
     def _load_modular_configs_from_cli(self, args):
         """
         Dynamically load modular configurations based on CLI arguments.
@@ -151,50 +222,66 @@ class ParamManager:
         # Convert argparse Namespace to dictionary if needed
         if not isinstance(args, dict):
             args = vars(args)
-        
-        # Get the config root directory
-        config_root = Path('config')
-        if not config_root.exists():
-            self.logger.warning(f"Where is the config directory? Idk, but it's not '/{config_root}'")
-            return
-        
-        # Scan for module directories
-        module_dirs = [d for d in config_root.iterdir() if d.is_dir()]
+    
+        self.logger.debug(f"Processing CLI args for modular configs: {args}")
+    
+        # Use discover_available_configs to find all available module configs
+        available_configs = self.discover_available_configs()
+    
+        # Skip 'base' and 'environment' modules
+        if 'base' in available_configs:
+            del available_configs['base']
+        if 'environment' in available_configs:
+            del available_configs['environment']
+    
+        # Create a mapping between possible CLI arg names and module directories
+        arg_to_module_mapping = {}
         
         # Process each module directory
-        for module_dir in module_dirs:
-            module_name = module_dir.name  # e.g., 'models', 'strategies'
+        for module_name in available_configs:
+            # Map both singular and plural forms to the module name
+            singular_name = module_name[:-1] if module_name.endswith('s') else module_name
+            plural_name = f"{module_name}s" if not module_name.endswith('s') else module_name
             
-            # Skip environments directory - handled separately in __init__
-            if module_name == 'environment':
+            arg_to_module_mapping[singular_name] = module_name
+            arg_to_module_mapping[plural_name] = module_name
+        
+        self.logger.debug(f"CLI arg to module mapping: {arg_to_module_mapping}")
+        
+        # Check each CLI arg against our mapping
+        for arg_name, arg_value in args.items():
+            if arg_value is None:
                 continue
-            
-            # Convert module directory name to likely CLI argument name
-            # For example: 'models' -> 'model', 'strategies' -> 'strategy'
-            cli_arg_name = module_name[:-1] if module_name.endswith('s') else module_name
-            
-            # Check if there's a CLI argument for this module
-            if cli_arg_name in args and args[cli_arg_name] is not None:
-                module_value = args[cli_arg_name]
                 
-                # Look for a config file matching the CLI value
-                config_file = module_dir / f"{module_value}.yaml"
+            # Check if this CLI arg maps to a module directory
+            if arg_name in arg_to_module_mapping:
+                module_dir = arg_to_module_mapping[arg_name]
+                yaml_files = available_configs[module_dir]
                 
-                # Try alternative file name patterns if the direct match doesn't exist
-                if not config_file.exists():
-                    # Try with underscore instead of dash
-                    config_file = module_dir / f"{module_value.replace('-', '_')}.yaml"
+                # Convert to lowercase for case-insensitive comparison
+                value_lower = arg_value.lower() if isinstance(arg_value, str) else str(arg_value).lower()
                 
-                if not config_file.exists():
-                    # Try lowercase
-                    config_file = module_dir / f"{module_value.lower()}.yaml"
+                # Possible filename variations
+                possible_filenames = [
+                    f"{arg_value}.yaml",
+                    f"{value_lower}.yaml",
+                    f"{value_lower.replace('-', '_')}.yaml"
+                ]
                 
-                # Load the config if found
-                if config_file.exists():
-                    self.logger.info(f"Loading module config: {config_file}")
+                # Find matching config file
+                found_file = None
+                for filename in possible_filenames:
+                    if filename in yaml_files:
+                        found_file = filename
+                        break
+                
+                if found_file:
+                    config_file = Path('config') / module_dir / found_file
+                    self.logger.info(f"Loading module config for --{arg_name}={arg_value}: {config_file}")
                     self._load_from_config(config_file)
                 else:
-                    self.logger.warning(f"There is no config file for {cli_arg_name}={module_value}")
+                    self.logger.warning(f"No config file found for --{arg_name}={arg_value} in {module_dir}/")
+                    self.logger.debug(f"Available files in {module_dir}: {yaml_files}")
         
         self.logger.debug("Modular configurations based on CLI args — ✔")
         
@@ -209,7 +296,7 @@ class ParamManager:
         config_root = Path('config')
         
         if not config_root.exists():
-            self.logger.warning(f"Config directory not found at {config_root}")
+            self.logger.warning(f"Where is the config directory? Idk, but it's not '/{config_root}'")
             return configs
         
         # Scan base config
@@ -340,12 +427,19 @@ class ParamManager:
             'resume_from': ('training', 'incremental_training', 'resume_from'),
         
             # Backtesting parameters
-            'walk_forward': ('backtesting', 'use_walk_forward'),
-            'position_sizing': ('backtesting', 'use_position_sizing'),
             'no_trade_threshold': ('backtesting', 'no_trade_threshold'),
             'min_position_change': ('backtesting', 'min_position_change'),
             'min_profit_target': ('backtesting', 'min_profit_target'),
             'exit_threshold': ('backtesting', 'exit_threshold'),
+            'exaggerate': ('backtesting', 'exaggerate'),
+            'compound': ('backtesting', 'compound'),
+            
+            # Strategy parameters
+            'strategy': ('strategy', 'type'),
+            
+            # Exchange parameters
+            'exchange': ('exchange', 'type'),
+            'fee_rate': ('exchange', 'fee_rate'),
         }
         
         # Process CLI arguments
@@ -365,7 +459,7 @@ class ParamManager:
         
     def _resolve_parameter_references(self):
         """
-        Resolve references between parameters (e.g., ${backtesting.fee_rate})
+        Resolve references between parameters (e.g., ${exchange.fee_rate})
         """
         def _resolve_value(value):
             if isinstance(value, str) and '${' in value:

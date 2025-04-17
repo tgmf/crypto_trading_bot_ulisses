@@ -228,21 +228,38 @@ class ResultLogger:
         
         # Mark positions based on data type
         if has_discrete_positions:
-            long_entries = results[results['position'].diff() == 1]
-            short_entries = results[results['position'].diff() == -1]
-            hedged_entries = results[results['position'].diff() == 2]
-            exits = results[~results['exit_price'].isna()] if 'exit_price' in results.columns else pd.DataFrame()
+            # Track the previous position to detect transitions
+            prev_position = results['position'].shift(1)
             
-            # Plot position markers
-            axes[0].scatter(long_entries.index, long_entries['close'], marker='^', color='green', 
-                        s=100, label='Long Entry')
-            axes[0].scatter(short_entries.index, short_entries['close'], marker='v', color='red', 
-                        s=100, label='Short Entry')
+            # Long entries: Going from non-positive to positive
+            long_entries = results[(results['position'] > 0) & (prev_position <= 0)]
             
+            # Short entries: Going from non-negative to negative
+            short_entries = results[(results['position'] < 0) & (prev_position >= 0)]
+            
+            # Hedged entries: Position value = 2 (per your quantum model convention)
+            # This assumes your hedged positions are coded as exactly 2
+            hedged_entries = results[(results['position'] == 2) & (prev_position != 2)]
+            
+            # Exits: Going to zero from any non-zero position
+            exits = results[(results['position'] == 0) & (prev_position != 0)]
+            
+            # Plot long entries
+            if not long_entries.empty:
+                axes[0].scatter(long_entries.index, long_entries['close'], marker='^', color='green', 
+                            s=100, label='Long Entry')
+            
+            # Plot short entries
+            if not short_entries.empty:
+                axes[0].scatter(short_entries.index, short_entries['close'], marker='v', color='red', 
+                            s=100, label='Short Entry')
+            
+            # Plot hedged entries with a different marker
             if not hedged_entries.empty:
                 axes[0].scatter(hedged_entries.index, hedged_entries['close'], marker='s', color='purple', 
-                            s=100, label='Hedged Position')
-                            
+                            s=100, label='Hedged Entry')
+            
+            # Plot exits
             if not exits.empty:
                 axes[0].scatter(exits.index, exits['close'], marker='x', color='black', 
                             s=80, label='Exit')

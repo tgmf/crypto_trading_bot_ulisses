@@ -2,14 +2,19 @@
 model:
   type: 'enhanced_bayesian'
   feature_cols:
-    - bb_pos
+    # - bb_pos
     - RSI_14
-    - MACDh_12_26_9
-    - trend_strength
-    - volatility
+    # - MACDh_12_26_9
+    # - trend_strength
+    # - volatility
     - volume_ratio
     - range
-    - macd_hist_diff
-    - rsi_diff
-    - bb_squeeze
+    # - macd_hist_diff
+    # - rsi_diff
+    # - bb_squeeze
   max_samples_per_batch: 100000
+
+  features:
+    include_sr: True
+    sr_lookbacks: [80]
+    include_sr_breakouts: true

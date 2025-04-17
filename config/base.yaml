@@ -35,10 +35,11 @@ strategy:
 # Training Settings
 training:
   memory_efficient: True
-  test_size: 0.05     # Small test size
+  forward_window: 80
+  test_size: 0.3     # Small test size
   max_memory_mb: 16000  # Memory limit
   max_samples_per_batch: 100000 # Max samples per batch
-  min_profit_target: 0.01 # Minimum profit target
+  min_profit_target: 0.0012 # Minimum profit target
 
   incremental_training:
     chunk_size: 100000
@@ -53,6 +54,7 @@ backtesting:
   min_position_change: 0.1
   exaggerate: False
   test_sets:
+    subset: 1/10
     custom_test_set: None
     path: data/test_sets
   # slippage: 0.001
@@ -73,4 +75,5 @@ walk_forward:
   min_train_samples: 1000  # Minimum samples needed for training
 
 exchange:
-  fee_rate: 0.006
+  type: 'binance'
+  fee_rate: 0.0006

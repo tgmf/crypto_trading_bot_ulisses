@@ -59,8 +59,33 @@ class BayesianModel:
             'volatility', 'volume_ratio', 'range', 'macd_hist_diff', 
             'rsi_diff', 'bb_squeeze'
         ])
+        
+        # Define support/resistance feature columns for easy selection
+        self.sr_feature_cols = []
     
-    def create_target(self, df, forward_window=60):
+        # Check if S/R features are enabled
+        if self.params.get('model', 'features', 'include_sr', default=False):
+            lookbacks = self.params.get('model', 'features', 'sr_lookbacks', default=[50])
+            include_breakouts = self.params.get('model', 'features', 'include_sr_breakouts', default=True)
+            
+            # Add base S/R features
+            for lb in lookbacks:
+                self.sr_feature_cols.extend([
+                    f'dist_to_resistance_{lb}',
+                    f'dist_to_support_{lb}'
+                ])
+                
+                # Add breakout features if enabled
+                if include_breakouts:
+                    self.sr_feature_cols.extend([
+                        f'resistance_break_{lb}',
+                        f'support_break_{lb}'
+                    ])
+
+            self.feature_cols.extend(self.sr_feature_cols)
+    
+    # create_target() v 0.2
+    def create_target(self, df, forward_window=40):
         """
         Create target variable for training
         
@@ -81,34 +106,154 @@ class BayesianModel:
         targets = np.zeros(n_samples)
         
         # Extract model parameters from params
-        min_profit = self.params.get('backtesting', 'min_profit_target', default=0.01)
         fee_rate = self.params.get('exchange', 'fee_rate', default=0.0006)
+        min_profit = self.params.get('training', 'min_profit_target', default=fee_rate*2)
+        forward_window = self.params.get('training', 'forward_window', default=forward_window)
         
-        # Calculate total fee cost for round trip (entry + exit)
-        fee_cost = fee_rate * 2
+        # Increase no_trade buffer to create clearer separation between classes
+        no_trade_buffer = min_profit
+        min_directional_strength = min_profit * 0.8  # Clear signal required
+    
+        # Add volatility detection for sideways markets
+        # Calculate rolling volatility over a shorter window than forward_window
+        volatility_window = min(30, forward_window // 4)  # Use smaller window for volatility
+        df['rolling_volatility'] = df['close'].pct_change().rolling(volatility_window).std()
+    
+        # Define low volatility threshold as a fraction of min_profit
+        low_vol_threshold = min_profit * 0.4  # 40% of min_profit
         
         # For each point in time, look forward to find profitable trades
         for i in range(n_samples - forward_window):
             entry_price = df['close'].iloc[i]
             future_prices = df['close'].iloc[i+1:i+forward_window+1].values
             
-            # Calculate potential returns for long positions
-            long_returns = future_prices / entry_price - 1 - fee_cost
+            # Get current position (target from previous step)
+            current_position = 0
+            if i > 0:
+                current_position = targets[i-1]
+            
+            # Calculate potential returns based on current position
+            if current_position == 1:  # Already long
+                long_fee_cost = fee_rate  # Only need to pay closing fee
+                short_fee_cost = fee_rate * 3  # Need to close long (1) + open short (1) + close short later (1)
+            elif current_position == 0:  # No position
+                long_fee_cost = fee_rate * 2  # Need to open (1) and close (1)
+                short_fee_cost = fee_rate * 2  # Need to open (1) and close (1)
+            else:  # current_position == -1, Already short
+                long_fee_cost = fee_rate * 3  # Need to close short (1) + open long (1) + close long later (1)
+                short_fee_cost = fee_rate  # Only need to pay closing fee
+            
+            # For long positions
+            long_returns = future_prices / entry_price - 1 - long_fee_cost
             max_long_return = np.max(long_returns) if len(long_returns) > 0 else -np.inf
             
-            # Calculate potential returns for short positions
-            short_returns = 1 - (future_prices / entry_price) - fee_cost
+            # For short positions
+            short_returns = 1 - (future_prices / entry_price) - short_fee_cost
             max_short_return = np.max(short_returns) if len(short_returns) > 0 else -np.inf
             
+            # Get current volatility
+            current_volatility = df['rolling_volatility'].iloc[i]
+        
+            # Check for low volatility sideways market
+            is_low_volatility = not np.isnan(current_volatility) and current_volatility < low_vol_threshold
+            
+            # Check if both long and short returns are weak
+            weak_returns = max(max_long_return, max_short_return) < min_profit
+            
+            # Check if returns are too similar (ambiguous direction)
+            similar_returns = abs(max_long_return - max_short_return) < no_trade_buffer * 0.5
+            
+            # Add extreme volatility check
+            volatility_z_score = (current_volatility - df['rolling_volatility'].mean()) / df['rolling_volatility'].std() if df['rolling_volatility'].std() > 0 else 0
+            extreme_volatility = abs(volatility_z_score) > 2.0  # Volatility is 2 std devs from mean
+            
             # Determine the optimal trade direction
-            if max_long_return >= min_profit and max_long_return > max_short_return:
+            # if indicator_divergence:
+            #     # Force no trade in low volatility or when signals are weak or ambiguous
+            #     targets[i] = 0  # No trade opportunity
+            if (max_long_return >= min_profit and 
+                max_long_return > max_short_return + no_trade_buffer and
+                max_long_return > min_directional_strength):
                 targets[i] = 1  # Long opportunity
-            elif max_short_return >= min_profit and max_short_return > max_long_return:
+            elif (max_short_return >= min_profit and 
+                    max_short_return > max_long_return + no_trade_buffer and
+                    max_short_return > min_directional_strength):
                 targets[i] = -1  # Short opportunity
             else:
                 targets[i] = 0  # No trade opportunity
+                
+        # Clean up the added column to prevent contaminating the DataFrame
+        if 'rolling_volatility' in df.columns:
+            df.drop('rolling_volatility', axis=1, inplace=True)
+            
+        # Print distribution to verify better balance
+        unique, counts = np.unique(targets, return_counts=True)
+        print(dict(zip(unique, counts)))
         
         return targets
+    
+    # create_target() v 0.1
+    # def create_target(self, df, forward_window=120):
+    #     """
+    #     Create target variable for training
+        
+    #     This method looks forward in time to identify profitable trading opportunities,
+    #     accounting for transaction fees. The target values are:
+    #     -1 = Short opportunity (profitable short trade)
+    #     0 = No trade opportunity (neither long nor short is profitable)
+    #     1 = Long opportunity (profitable long trade)
+        
+    #     Args:
+    #         df (DataFrame): Price data with OHLCV columns
+    #         forward_window (int): Number of periods to look ahead for profit opportunities
+            
+    #     Returns:
+    #         ndarray: Array of target values (-1, 0, or 1)
+    #     """
+    #     n_samples = len(df)
+    #     targets = np.zeros(n_samples)
+        
+    #     # Extract model parameters from params
+    #     min_profit = self.params.get('backtesting', 'min_profit_target', default=fee_rate*3)
+    #     no_trade_buffer = min_profit * 0.5  # Half the min_profit as buffer
+    #     min_directional_strength = min_profit * 0.8  # Clear signal required
+        
+    #     fee_rate = self.params.get('exchange', 'fee_rate', default=0.0006)
+        
+    #     # Calculate total fee cost for round trip (entry + exit)
+    #     fee_cost = fee_rate * 2
+        
+        
+    #     # For each point in time, look forward to find profitable trades
+    #     for i in range(n_samples - forward_window):
+    #         entry_price = df['close'].iloc[i]
+    #         future_prices = df['close'].iloc[i+1:i+forward_window+1].values
+            
+    #         # Calculate potential returns for long positions
+    #         long_returns = future_prices / entry_price - 1 - fee_cost
+    #         max_long_return = np.max(long_returns) if len(long_returns) > 0 else -np.inf
+            
+    #         # Calculate potential returns for short positions
+    #         short_returns = 1 - (future_prices / entry_price) - fee_cost
+    #         max_short_return = np.max(short_returns) if len(short_returns) > 0 else -np.inf
+            
+    #         # Determine the optimal trade direction
+    #         if (max_long_return >= min_profit and 
+    #             max_long_return > max_short_return + no_trade_buffer and
+    #             max_long_return > min_directional_strength):
+    #             targets[i] = 1  # Long opportunity
+    #         elif (max_short_return >= min_profit and 
+    #                 max_short_return > max_long_return + no_trade_buffer and
+    #                 max_short_return > min_directional_strength):
+    #             targets[i] = -1  # Short opportunity
+    #         else:
+    #             targets[i] = 0  # No trade opportunity
+                
+    #     # Print distribution to verify better balance
+    #     unique, counts = np.unique(targets, return_counts=True)
+    #     print(dict(zip(unique, counts)))
+        
+    #     return targets
     
     def build_model(self, X_train, y_train):
         """
@@ -330,6 +475,68 @@ class BayesianModel:
             import traceback
             self.logger.error(traceback.format_exc())
             return False
+    
+    def predict_probabilities(self, df_or_X):
+        """
+        Predict probabilities for each state
+        
+        This unified method can handle either DataFrames or pre-scaled feature arrays,
+        making it flexible for different use cases. It returns a probability array:
+        P(short), P(no_trade), P(long)
+        
+        Args:
+            df_or_X: Either a DataFrame with feature columns or a pre-scaled feature array
+            
+        Returns:
+            ndarray: Probability array [P(short), P(no_trade), P(long)]
+        """
+        # Ensure we have the trace loaded
+        if self.trace is None:
+            self.logger.error("No model trace available. Load or train a model first.")
+            return None
+        
+        # Handle different input types
+        if isinstance(df_or_X, pd.DataFrame):
+            # Check for missing feature columns
+            missing_cols = [col for col in self.feature_cols if col not in df_or_X.columns]
+            if missing_cols:
+                self.logger.error(f"Missing feature columns in data: {missing_cols}")
+                return None
+            
+            # Extract features and scale
+            X = df_or_X[self.feature_cols].values
+            X_scaled = self.scaler.transform(X)
+        else:
+            # Assume input is already a properly scaled feature array
+            X_scaled = df_or_X
+        
+        # Get parameter posteriors from the Bayesian model
+        alpha_post = self.trace.posterior["alpha"].mean(("chain", "draw")).values
+        betas_post = self.trace.posterior["betas"].mean(("chain", "draw")).values
+        
+        # Calculate linear predictor (dot product of features and coefficients)
+        eta = np.dot(X_scaled, betas_post)
+        
+        # Calculate ordered logit probabilities
+        probs = np.zeros((len(X_scaled), 3))
+        
+        # Use sigmoid to convert to probabilities
+        p0 = 1 / (1 + np.exp(-(alpha_post[0] - eta)))  # P(y <= 0)
+        p1 = 1 / (1 + np.exp(-(alpha_post[1] - eta)))  # P(y <= 1)
+        
+        # Calculate probabilities for each class
+        probs[:, 0] = p0                # P(y=0) = P(y<=0)
+        probs[:, 1] = p1 - p0           # P(y=1) = P(y<=1) - P(y<=0)
+        probs[:, 2] = 1 - p1            # P(y=2) = 1 - P(y<=1)
+        
+        # Ensure probabilities are non-negative
+        probs = np.maximum(0, probs)
+
+        # Normalize rows to sum to 1
+        row_sums = probs.sum(axis=1, keepdims=True)
+        probs = probs / row_sums
+        
+        return probs
 
     def train_with_cv(self):
         """
@@ -1020,61 +1227,6 @@ class BayesianModel:
             import traceback
             self.logger.error(traceback.format_exc())
             return False
-    
-    def predict_probabilities(self, df_or_X):
-        """
-        Predict probabilities for each state
-        
-        This unified method can handle either DataFrames or pre-scaled feature arrays,
-        making it flexible for different use cases. It returns a probability array:
-        P(short), P(no_trade), P(long)
-        
-        Args:
-            df_or_X: Either a DataFrame with feature columns or a pre-scaled feature array
-            
-        Returns:
-            ndarray: Probability array [P(short), P(no_trade), P(long)]
-        """
-        # Ensure we have the trace loaded
-        if self.trace is None:
-            self.logger.error("No model trace available. Load or train a model first.")
-            return None
-        
-        # Handle different input types
-        if isinstance(df_or_X, pd.DataFrame):
-            # Check for missing feature columns
-            missing_cols = [col for col in self.feature_cols if col not in df_or_X.columns]
-            if missing_cols:
-                self.logger.error(f"Missing feature columns in data: {missing_cols}")
-                return None
-            
-            # Extract features and scale
-            X = df_or_X[self.feature_cols].values
-            X_scaled = self.scaler.transform(X)
-        else:
-            # Assume input is already a properly scaled feature array
-            X_scaled = df_or_X
-        
-        # Get parameter posteriors from the Bayesian model
-        alpha_post = self.trace.posterior["alpha"].mean(("chain", "draw")).values
-        betas_post = self.trace.posterior["betas"].mean(("chain", "draw")).values
-        
-        # Calculate linear predictor (dot product of features and coefficients)
-        eta = np.dot(X_scaled, betas_post)
-        
-        # Calculate ordered logit probabilities
-        probs = np.zeros((len(X_scaled), 3))
-        
-        # Use sigmoid to convert to probabilities
-        p0 = 1 / (1 + np.exp(-(alpha_post[0] - eta)))  # P(y <= 0)
-        p1 = 1 / (1 + np.exp(-(alpha_post[1] - eta)))  # P(y <= 1)
-        
-        # Calculate probabilities for each class
-        probs[:, 0] = p0                # P(y=0) = P(y<=0)
-        probs[:, 1] = p1 - p0           # P(y=1) = P(y<=1) - P(y<=0)
-        probs[:, 2] = 1 - p1            # P(y=2) = 1 - P(y<=1)
-        
-        return probs
 
     def _predict_class(self, X, trace):
         """
@@ -1830,14 +1982,15 @@ class BayesianModel:
         
         return True
         
-    def run_backtest_with_position_sizing(self, df=None, no_trade_threshold=0.96, 
-                                            min_position_change=0.025, compound_returns=True, exaggerate=True):
+    def run_backtest_with_position_sizing(self, df=None, probabilities=None, no_trade_threshold=0.00096, 
+                                            min_position_change=0.25, compound_returns=True, exaggerate=True):
         """
         Run backtest with continuous position sizing based on probability distributions
     
         
         Args:
             df (DataFrame): Price data with OHLCV columns
+            probabilities (array): Probabilities for long, short, and no_trade
             no_trade_threshold (float): Threshold for no_trade probability to ignore signals
             min_position_change (float): Minimum position change to avoid fee churn
             compound_returns (bool): Whether to compound returns for position sizing
@@ -1849,6 +2002,7 @@ class BayesianModel:
         exchange = self.params.get('data', 'exchanges', 0)
         symbol = self.params.get('data', 'symbols', 0)
         timeframe = self.params.get('data', 'timeframes', 0)
+        no_trade_threshold = self.params.get('backtesting', 'enter_threshold', default=no_trade_threshold)
         exaggerate = self.params.get('backtesting', 'exaggerate', default=exaggerate)
         min_position_change = self.params.get('backtesting', 'min_position_change', default=min_position_change)
         backtest_source = "test_set"
@@ -1885,7 +2039,8 @@ class BayesianModel:
                     backtest_source = "processed_data"
                     
             # Get probabilistic predictions
-            probabilities = self.predict_probabilities(df)
+            if probabilities is None:
+                probabilities = self.predict_probabilities(df)
             
             if probabilities is None:
                 self.logger.error("Failed to get probability predictions")
@@ -1902,6 +2057,20 @@ class BayesianModel:
             # Store original probabilities for reference
             results['original_long_prob'] = results['long_prob'].copy()
             results['original_short_prob'] = results['short_prob'].copy()
+            
+            # Calculate raw position sizes directly from probabilities
+            # Ignore probabilities if no_trade is high
+            results['raw_long_position'] = np.where(
+                results['no_trade_prob'] >= no_trade_threshold,
+                0,  # No position when no_trade probability is high
+                results['long_prob']  # Otherwise use long probability directly
+            )
+            
+            results['raw_short_position'] = np.where(
+                results['no_trade_prob'] >= no_trade_threshold,
+                0,  # No position when no_trade probability is high
+                results['short_prob']  # Otherwise use short probability directly
+            )
             
             # Apply exaggeration if enabled
             if exaggerate:
@@ -1945,20 +2114,6 @@ class BayesianModel:
                                 # Update probabilities
                                 results.iloc[i, results.columns.get_loc('long_prob')] = long_prob + long_boost
                                 results.iloc[i, results.columns.get_loc('short_prob')] = short_prob + short_boost
-            
-            # Calculate raw position sizes directly from probabilities
-            # Ignore probabilities if no_trade is high
-            results['raw_long_position'] = np.where(
-                results['no_trade_prob'] >= no_trade_threshold,
-                0,  # No position when no_trade probability is high
-                results['long_prob']  # Otherwise use long probability directly
-            )
-            
-            results['raw_short_position'] = np.where(
-                results['no_trade_prob'] >= no_trade_threshold,
-                0,  # No position when no_trade probability is high
-                results['short_prob']  # Otherwise use short probability directly
-            )
         
             # Initialize compounding factor (starting with 1.0 = 100% of base size)
             if compound_returns:

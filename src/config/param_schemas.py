@@ -98,6 +98,24 @@ def get_parameter_schemas() -> SchemaRegistry:
             'type': 'boolean',
             'description': 'Whether to use memory-efficient settings for JAX'
         },
+        # Support/Resistance feature parameters
+        ('model', 'features', 'include_sr'): {
+            'type': 'boolean',
+            'description': 'Whether to include support/resistance features'
+        },
+        ('model', 'features', 'sr_lookbacks'): {
+            'type': 'list_str',
+            'description': 'Lookback periods for support/resistance levels'
+        },
+        ('model', 'features', 'include_sr_breakouts'): {
+            'type': 'boolean',
+            'description': 'Whether to include support/resistance breakout signals'
+        },
+        ('model', 'features', 'atr_length'): {
+            'type': 'integer',
+            'min': 1,
+            'description': 'ATR period length for S/R feature normalization'
+        },
         # Strategy parameters
         ('strategy', 'type'): {
             'type': 'string',

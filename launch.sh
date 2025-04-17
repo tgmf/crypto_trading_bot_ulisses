@@ -83,7 +83,7 @@ COMMAND=$1
 shift 1
 
 # Define valid commands
-MAIN_COMMANDS=("train" "backtest" "collect-data" "continue-train" "incremental" "live" "paper")
+MAIN_COMMANDS=("train" "backtest" "target-backtest" "collect-data" "continue-train" "incremental" "live" "paper")
 SPECIAL_COMMANDS=("notebook" "analyze" "help" "docker" "docker-dev")
 
 # Check if the command is valid for main.py
