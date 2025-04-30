@@ -192,69 +192,6 @@ class BayesianModel:
         
         return targets
     
-    # create_target() v 0.1
-    # def create_target(self, df, forward_window=120):
-    #     """
-    #     Create target variable for training
-        
-    #     This method looks forward in time to identify profitable trading opportunities,
-    #     accounting for transaction fees. The target values are:
-    #     -1 = Short opportunity (profitable short trade)
-    #     0 = No trade opportunity (neither long nor short is profitable)
-    #     1 = Long opportunity (profitable long trade)
-        
-    #     Args:
-    #         df (DataFrame): Price data with OHLCV columns
-    #         forward_window (int): Number of periods to look ahead for profit opportunities
-            
-    #     Returns:
-    #         ndarray: Array of target values (-1, 0, or 1)
-    #     """
-    #     n_samples = len(df)
-    #     targets = np.zeros(n_samples)
-        
-    #     # Extract model parameters from params
-    #     min_profit = self.params.get('backtesting', 'min_profit_target', default=fee_rate*3)
-    #     no_trade_buffer = min_profit * 0.5  # Half the min_profit as buffer
-    #     min_directional_strength = min_profit * 0.8  # Clear signal required
-        
-    #     fee_rate = self.params.get('exchange', 'fee_rate', default=0.0006)
-        
-    #     # Calculate total fee cost for round trip (entry + exit)
-    #     fee_cost = fee_rate * 2
-        
-        
-    #     # For each point in time, look forward to find profitable trades
-    #     for i in range(n_samples - forward_window):
-    #         entry_price = df['close'].iloc[i]
-    #         future_prices = df['close'].iloc[i+1:i+forward_window+1].values
-            
-    #         # Calculate potential returns for long positions
-    #         long_returns = future_prices / entry_price - 1 - fee_cost
-    #         max_long_return = np.max(long_returns) if len(long_returns) > 0 else -np.inf
-            
-    #         # Calculate potential returns for short positions
-    #         short_returns = 1 - (future_prices / entry_price) - fee_cost
-    #         max_short_return = np.max(short_returns) if len(short_returns) > 0 else -np.inf
-            
-    #         # Determine the optimal trade direction
-    #         if (max_long_return >= min_profit and 
-    #             max_long_return > max_short_return + no_trade_buffer and
-    #             max_long_return > min_directional_strength):
-    #             targets[i] = 1  # Long opportunity
-    #         elif (max_short_return >= min_profit and 
-    #                 max_short_return > max_long_return + no_trade_buffer and
-    #                 max_short_return > min_directional_strength):
-    #             targets[i] = -1  # Short opportunity
-    #         else:
-    #             targets[i] = 0  # No trade opportunity
-                
-    #     # Print distribution to verify better balance
-    #     unique, counts = np.unique(targets, return_counts=True)
-    #     print(dict(zip(unique, counts)))
-        
-    #     return targets
-    
     def build_model(self, X_train, y_train):
         """
         Build Bayesian ordered logistic regression model
@@ -1982,14 +1919,14 @@ class BayesianModel:
         
         return True
         
-    def run_backtest_with_position_sizing(self, df=None, probabilities=None, no_trade_threshold=0.00096, 
+    def run_backtest_with_position_sizing(self, data_context, probabilities=None, no_trade_threshold=0.00096, 
                                             min_position_change=0.25, compound_returns=True, exaggerate=True):
         """
         Run backtest with continuous position sizing based on probability distributions
     
         
         Args:
-            df (DataFrame): Price data with OHLCV columns
+            data_context (DataContext): Optional DataContext containing price data
             probabilities (array): Probabilities for long, short, and no_trade
             no_trade_threshold (float): Threshold for no_trade probability to ignore signals
             min_position_change (float): Minimum position change to avoid fee churn
@@ -2005,42 +1942,27 @@ class BayesianModel:
         no_trade_threshold = self.params.get('backtesting', 'enter_threshold', default=no_trade_threshold)
         exaggerate = self.params.get('backtesting', 'exaggerate', default=exaggerate)
         min_position_change = self.params.get('backtesting', 'min_position_change', default=min_position_change)
-        backtest_source = "test_set"
-        self.logger.info(f"Running position sizing backtest for {symbol} {timeframe}")
         
         try:
-            # If no DataFrame provided, load using DataContext
-            if df is None:
-                # Try to load the test set first
-                symbol_safe = symbol.replace('/', '_')
-                test_sets_path = self.params.get('data', 'test_set', 'path', default="data/test_sets")
-                test_file_path = Path(f"{test_sets_path}/{exchange}/{symbol_safe}/{timeframe}_test.csv")
-                
-                if test_file_path.exists():
-                    self.logger.info(f"Loading test set from {test_file_path}")
-                    test_df = pd.read_csv(test_file_path, index_col='timestamp', parse_dates=True)
-                    test_context = DataContext(self.params, test_df, exchange, symbol, timeframe, source="test_set")
-                    df = test_df
-                    backtest_source = "test_set"
-                else:
-                    # No test set, load processed data
-                    self.logger.info("No test set found, loading processed data")
-                    data_context = DataContext.from_processed_data(self.params, exchange, symbol, timeframe)
+            # Record the start of position sizing backtest
+            data_context.add_processing_step("position_sizing_backtest_start", {
+                "no_trade_threshold": no_trade_threshold,
+                "min_position_change": min_position_change,
+                "compound_returns": compound_returns,
+                "exaggerate": exaggerate,
+                "data_source": data_context.source
+            })
+        
+            # Get DataFrame from DataContext
+            df = data_context.df
                     
-                    if data_context is None:
-                        self.logger.error(f"Failed to load data for {symbol} {timeframe}")
-                        return False, False, False
-                        
-                    # Validate the data has required columns
-                    if not data_context.validate(required_columns=self.feature_cols + ['open', 'high', 'low', 'close', 'volume']):
-                        return False, False, False
-                    
-                    df = data_context.df
-                    backtest_source = "processed_data"
-                    
-            # Get probabilistic predictions
+            # Generate probabilities if not provided
             if probabilities is None:
+                self.logger.info(f"Generating probability predictions for {len(df)} rows")
                 probabilities = self.predict_probabilities(df)
+                data_context.add_processing_step("generate_probabilities", {
+                    "shape": probabilities.shape if probabilities is not None else None
+                })
             
             if probabilities is None:
                 self.logger.error("Failed to get probability predictions")
@@ -2132,6 +2054,7 @@ class BayesianModel:
             realized_pnl = 0.0     # Track realized P&L for compounding
             prev_long = 0.0
             prev_short = 0.0
+            trade_count = 0
             
             for i in range(len(results)):
                 # Get raw position signals based on probabilities
@@ -2149,9 +2072,13 @@ class BayesianModel:
                 # Calculate potential position changes
                 long_change = abs(raw_long_sized - prev_long)
                 short_change = abs(raw_short_sized - prev_short)
+            
+                # Track if a position change occurred in this iteration
+                position_changed = False
                 
                 # Apply position changes only if they exceed minimum threshold
                 if long_change >= min_position_change:
+                    position_changed = True
                     # Position is changing - ONLY NOW do we realize P&L and compound
                     if i > 0 and prev_long > 0:
                         # Calculate P&L from previous position
@@ -2179,6 +2106,7 @@ class BayesianModel:
                                     
                 # Same logic for short positions
                 if short_change >= min_position_change:
+                    position_changed = True
                     # Position is changing - ONLY NOW do we realize P&L and compound
                     if i > 0 and prev_short > 0:
                         # Calculate P&L from previous position (shorts gain when price falls)
@@ -2203,6 +2131,10 @@ class BayesianModel:
                 else:
                     # No change to short position
                     new_short = prev_short
+            
+                # Update trade count if position changed
+                if position_changed:
+                    trade_count += 1
                 
                 # Update compound factor based on REALIZED pnl only
                 if compound_returns and i > 0 and (long_change >= min_position_change or short_change >= min_position_change):
@@ -2253,6 +2185,8 @@ class BayesianModel:
             metrics['no_trade_threshold'] = no_trade_threshold
             metrics['compound_returns'] = compound_returns
             metrics['exaggerate_positions'] = exaggerate
+            metrics['data_source'] = data_context.source
+            metrics['total_position_changes'] = trade_count
             
             # Add compounding information to metrics
             if compound_returns:
@@ -2264,38 +2198,28 @@ class BayesianModel:
                     results['long_position'].max(),
                     results['short_position'].max()
                 )
-            else:
-                metrics['compound_returns'] = False
             
             # Add exaggeration information to metrics
-            metrics['exaggerate_positions'] = exaggerate
             if exaggerate:
                 metrics['avg_long_boost'] = (results['long_prob'] - results['original_long_prob']).mean()
                 metrics['avg_short_boost'] = (results['short_prob'] - results['original_short_prob']).mean()
                 metrics['max_long_boost'] = (results['long_prob'] - results['original_long_prob']).max()
                 metrics['max_short_boost'] = (results['short_prob'] - results['original_short_prob']).max()
             
-            # Create a backtest context to track all operations
-            backtest_context = DataContext(
-                self.params, 
-                results, 
-                exchange, 
-                symbol, 
-                timeframe, 
-                source=f"backtest_{backtest_source}"
-            )
+            # Update DataContext with results
+            data_context.df = results
         
-            # Add backtest parameters to processing history
-            backtest_context.add_processing_step("position_sizing_backtest", {
-                "no_trade_threshold": no_trade_threshold,
-                "min_position_change": min_position_change,
-                "compound_returns": compound_returns,
-                "exaggerate": exaggerate,
-                "test_length": len(results),
-                "date_range": f"{results.index[0]} to {results.index[-1]}"
+            # Add backtest results to processing history
+            data_context.add_processing_step("position_sizing_backtest_complete", {
+                "final_return": metrics.get('final_return', 0),
+                "sharpe_ratio": metrics.get('sharpe_ratio', 0),
+                "max_drawdown": metrics.get('max_drawdown', 0),
+                "win_rate": metrics.get('win_rate', 0),
+                "total_trades": trade_count
             })
-            # Add context metadata to metrics
-            metrics['backtest_context'] = backtest_context.get_processing_history()
+        
+            # Add processing history to metrics
+            metrics['processing_history'] = data_context.get_processing_history()
         
             # Create visualization using result logger
             from ..core.result_logger import ResultLogger
@@ -2321,6 +2245,14 @@ class BayesianModel:
             self.logger.error(f"Error in position sizing backtest: {str(e)}")
             import traceback
             self.logger.error(traceback.format_exc())
+            
+            # Add error information to DataContext
+            if 'data_context' in locals():
+                data_context.add_processing_step("position_sizing_error", {
+                    "error": str(e),
+                    "traceback": traceback.format_exc()
+                })
+            
             return False, False, False
 
     def _calculate_position_sizing_metrics(self, results, min_position_change):

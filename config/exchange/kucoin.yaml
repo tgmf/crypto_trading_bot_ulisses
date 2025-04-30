@@ -1,5 +1,10 @@
 # Binance exchange configuration
 exchange:
   type: 'kucoin'
-  fee_rate: 0.0006
+  taker_fee_rate: 0.0006
+  maker_fee_rate: 0.0002
+  leverage: 10
+  max_open_trades: 12
+  max_open_trades_per_symbol: 6
+  max_open_trades_per_side: 6
   testnet: True

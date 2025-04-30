@@ -56,6 +56,7 @@ backtesting:
   test_sets:
     subset: 1/10
     custom_test_set: None
+    test_set_only: False
     path: data/test_sets
   # slippage: 0.001
   # leverage: 1
@@ -76,4 +77,22 @@ walk_forward:
 
 exchange:
   type: 'binance'
-  fee_rate: 0.0006
+  taker_fee_rate: 0.0006
+  maker_fee_rate: 0.0002
+  leverage: 10
+  max_open_trades: 12
+  max_open_trades_per_symbol: 6
+  max_open_trades_per_side: 6
+  testnet: True
+
+analysis:
+  retracement:
+    pivot_type: 'both'
+    look_forward: 144
+    pivot_window: 5
+    max_pivots: 1000000
+    sample_rate: 1
+    pivot_method: 'fractal'
+    fractal_min_window: 5
+    fractal_max_windows: 5
+    fractal_min_strength: 2

@@ -111,9 +111,9 @@ class DataContext:
         return hashlib.md5(data_repr.encode()).hexdigest()
 
     @classmethod
-    def from_processed_data(cls, param_manager, exchange, symbol, timeframe):
+    def from_raw_data(cls, param_manager, exchange, symbol, timeframe):
         """
-        Create DataContext from processed data directory with path from ParamManager.
+        Create DataContext from raw data directory with path from ParamManager.
         
         Args:
             param_manager: ParamManager instance
@@ -129,18 +129,17 @@ class DataContext:
         """
         logger = logging.getLogger(__name__)
         
-        # Get data directory from params or use default
-        processed_path = param_manager.get('data', 'processed', 'path',
-                                            default='data/processed')
+        # Get raw data directory from params or use default
+        raw_path = param_manager.get('data', 'raw', 'path', default='data/raw')
         
         # Create safe symbol name for path
         symbol_safe = symbol.replace('/', '_')
         
         # Construct file path
-        file_path = Path(f"{processed_path}/{exchange}/{symbol_safe}/{timeframe}.csv")
+        file_path = Path(f"{raw_path}/{exchange}/{symbol_safe}/{timeframe}.csv")
         
         if not file_path.exists():
-            logger.warning(f"Processed data file not found: {file_path}")
+            logger.warning(f"Raw data file not found: {file_path}")
             return None
             
         try:
@@ -148,15 +147,105 @@ class DataContext:
             df = pd.read_csv(file_path, index_col='timestamp', parse_dates=True)
             
             # Create and return DataContext
-            context = cls(param_manager, df, exchange, symbol, timeframe, source="processed")
+            context = cls(param_manager, df, exchange, symbol, timeframe, source="raw")
             
-            logger.info(f"Loaded processed data for {symbol} {timeframe} with {len(df)} rows")
+            logger.info(f"Loaded raw data for {symbol} {timeframe} with {len(df)} rows")
             return context
             
         except Exception as e:
-            logger.error(f"Error loading processed data for {symbol} {timeframe}: {str(e)}")
-            raise
-    
+            logger.error(f"Error loading raw data for {symbol} {timeframe}: {str(e)}")
+            if param_manager.get('system', 'strict_mode', default=False):
+                raise
+            return None
+    @classmethod
+    def _load_from_path(cls, param_manager, exchange, symbol, timeframe, path, filename_pattern, source_name, strict_mode=None):
+        """
+        Internal helper method to load data from a file path with common error handling.
+        
+        Args:
+            param_manager: ParamManager instance
+            exchange: Exchange name (e.g., 'binance')
+            symbol: Trading pair (e.g., 'BTC/USDT')
+            timeframe: Data timeframe (e.g., '1h')
+            path: Base path to load from
+            filename_pattern: Pattern for filename, with {} placeholders for timeframe
+            source_name: Source name for logging and context
+            strict_mode: Whether to raise exceptions or return None
+            
+        Returns:
+            DataContext: Instance with loaded data or None if file not found
+        """
+        logger = logging.getLogger(__name__)
+        
+        # Create safe symbol name for path
+        symbol_safe = symbol.replace('/', '_')
+        
+        # Construct file path
+        file_path = Path(f"{path}/{exchange}/{symbol_safe}/{filename_pattern.format(timeframe=timeframe)}")
+        
+        if not file_path.exists():
+            logger.warning(f"{source_name} file not found: {file_path}")
+            return None
+            
+        try:
+            # Load the data
+            df = pd.read_csv(file_path, index_col='timestamp', parse_dates=True)
+            
+            # Create and return DataContext
+            context = cls(param_manager, df, exchange, symbol, timeframe, source=source_name)
+            
+            logger.info(f"Loaded {source_name} data for {symbol} {timeframe} with {len(df)} rows")
+            return context
+            
+        except Exception as e:
+            logger.error(f"Error loading {source_name} data for {symbol} {timeframe}: {str(e)}")
+            if strict_mode is None:
+                strict_mode = param_manager.get('system', 'strict_mode', default=False)
+            if strict_mode:
+                raise
+            return None
+
+    @classmethod
+    def from_raw_data(cls, param_manager, exchange, symbol, timeframe):
+        """
+        Create DataContext from raw data directory with path from ParamManager.
+        
+        Args:
+            param_manager: ParamManager instance
+            exchange: Exchange name (e.g., 'binance')
+            symbol: Trading pair (e.g., 'BTC/USDT')
+            timeframe: Data timeframe (e.g., '1h')
+            
+        Returns:
+            DataContext: Instance with loaded data or None if file not found
+        """
+        raw_path = param_manager.get('data', 'raw', 'path', default='data/raw')
+        return cls._load_from_path(
+            param_manager, exchange, symbol, timeframe,
+            raw_path, "{timeframe}.csv", "raw"
+        )
+
+    @classmethod
+    def from_processed_data(cls, param_manager, exchange, symbol, timeframe):
+        """
+        Create DataContext from processed data directory with path from ParamManager.
+        
+        Args:
+            param_manager: ParamManager instance
+            exchange: Exchange name (e.g., 'binance')
+            symbol: Trading pair (e.g., 'BTC/USDT')
+            timeframe: Data timeframe (e.g., '1h')
+            
+        Returns:
+            DataContext: Instance with loaded data or None if file not found
+        """
+        processed_path = param_manager.get('data', 'processed', 'path', default='data/processed')
+        return cls._load_from_path(
+            param_manager, exchange, symbol, timeframe,
+            processed_path, "{timeframe}.csv", "processed", 
+            strict_mode=True  # Keep existing behavior with strict mode always on
+        )
+
     @classmethod
     def from_test_set(cls, param_manager, exchange, symbol, timeframe):
         """
@@ -171,37 +260,12 @@ class DataContext:
         Returns:
             DataContext: Instance with loaded data or None if file not found
         """
-        logger = logging.getLogger(__name__)
+        test_sets_path = param_manager.get('backtesting', 'test_sets', 'path', default='data/test_sets')
+        return cls._load_from_path(
+            param_manager, exchange, symbol, timeframe,
+            test_sets_path, "{timeframe}_test.csv", "test_set"
+        )
         
-        # Get test set directory from params or use default
-        test_sets_path = param_manager.get('backtesting', 'test_sets', 'path', 
-                                            default='data/test_sets')
-        
-        # Create safe symbol name for path
-        symbol_safe = symbol.replace('/', '_')
-        
-        # Construct file path
-        file_path = Path(f"{test_sets_path}/{exchange}/{symbol_safe}/{timeframe}_test.csv")
-        
-        if not file_path.exists():
-            logger.warning(f"Test set file not found: {file_path}")
-            return None
-            
-        try:
-            # Load the data
-            df = pd.read_csv(file_path, index_col='timestamp', parse_dates=True)
-            
-            # Create and return DataContext
-            context = cls(param_manager, df, exchange, symbol, timeframe, source="test_set")
-            
-            logger.info(f"Loaded test set for {symbol} {timeframe} with {len(df)} rows")
-            return context
-            
-        except Exception as e:
-            logger.error(f"Error loading test set for {symbol} {timeframe}: {str(e)}")
-            if param_manager.get('system', 'strict_mode', default=False):
-                raise
-            return None
     
     def validate(self, required_columns=None, min_rows=1):
         """
@@ -557,3 +621,97 @@ class DataContext:
     def __len__(self):
         """Return length of the DataFrame"""
         return 0 if self.df is None else len(self.df)
+    
+    # legacy
+    # @classmethod
+    # def from_processed_data(cls, param_manager, exchange, symbol, timeframe):
+    #     """
+    #     Create DataContext from processed data directory with path from ParamManager.
+        
+    #     Args:
+    #         param_manager: ParamManager instance
+    #         exchange: Exchange name (e.g., 'binance')
+    #         symbol: Trading pair (e.g., 'BTC/USDT')
+    #         timeframe: Data timeframe (e.g., '1h')
+            
+    #     Returns:
+    #         DataContext: Instance with loaded data or None if file not found
+            
+    #     Raises:
+    #         FileNotFoundError: If the specified data file doesn't exist
+    #     """
+    #     logger = logging.getLogger(__name__)
+        
+    #     # Get data directory from params or use default
+    #     processed_path = param_manager.get('data', 'processed', 'path',
+    #                                         default='data/processed')
+        
+    #     # Create safe symbol name for path
+    #     symbol_safe = symbol.replace('/', '_')
+        
+    #     # Construct file path
+    #     file_path = Path(f"{processed_path}/{exchange}/{symbol_safe}/{timeframe}.csv")
+        
+    #     if not file_path.exists():
+    #         logger.warning(f"Processed data file not found: {file_path}")
+    #         return None
+            
+    #     try:
+    #         # Load the data
+    #         df = pd.read_csv(file_path, index_col='timestamp', parse_dates=True)
+            
+    #         # Create and return DataContext
+    #         context = cls(param_manager, df, exchange, symbol, timeframe, source="processed")
+            
+    #         logger.info(f"Loaded processed data for {symbol} {timeframe} with {len(df)} rows")
+    #         return context
+            
+    #     except Exception as e:
+    #         logger.error(f"Error loading processed data for {symbol} {timeframe}: {str(e)}")
+    #         raise
+    
+    # @classmethod
+    # def from_test_set(cls, param_manager, exchange, symbol, timeframe):
+    #     """
+    #     Create DataContext from test set directory with path from ParamManager.
+        
+    #     Args:
+    #         param_manager: ParamManager instance
+    #         exchange: Exchange name (e.g., 'binance')
+    #         symbol: Trading pair (e.g., 'BTC/USDT')
+    #         timeframe: Data timeframe (e.g., '1h')
+            
+    #     Returns:
+    #         DataContext: Instance with loaded data or None if file not found
+    #     """
+    #     logger = logging.getLogger(__name__)
+        
+    #     # Get test set directory from params or use default
+    #     test_sets_path = param_manager.get('backtesting', 'test_sets', 'path', 
+    #                                         default='data/test_sets')
+        
+    #     # Create safe symbol name for path
+    #     symbol_safe = symbol.replace('/', '_')
+        
+    #     # Construct file path
+    #     file_path = Path(f"{test_sets_path}/{exchange}/{symbol_safe}/{timeframe}_test.csv")
+        
+    #     if not file_path.exists():
+    #         logger.warning(f"Test set file not found: {file_path}")
+    #         return None
+            
+    #     try:
+    #         # Load the data
+    #         df = pd.read_csv(file_path, index_col='timestamp', parse_dates=True)
+            
+    #         # Create and return DataContext
+    #         context = cls(param_manager, df, exchange, symbol, timeframe, source="test_set")
+            
+    #         logger.info(f"Loaded test set for {symbol} {timeframe} with {len(df)} rows")
+    #         return context
+            
+    #     except Exception as e:
+    #         logger.error(f"Error loading test set for {symbol} {timeframe}: {str(e)}")
+    #         if param_manager.get('system', 'strict_mode', default=False):
+    #             raise
+    #         return None

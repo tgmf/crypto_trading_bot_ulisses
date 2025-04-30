@@ -44,7 +44,7 @@ class BacktestEngine:
         self.logger = logging.getLogger(__name__)
         # Extract fee rate from config or use default value
         # Extract fee rate and thresholds from params
-        self.fee_rate = self.params.get('exchange', 'fee_rate', default=0.0006)
+        self.taker_fee_rate = self.params.get('exchange', 'taker_fee_rate', default=0.0006)
         self.exit_threshold = self.params.get('backtesting', 'exit_threshold', default=0.3)
         
         # Create result logger instance for consistent output
@@ -71,6 +71,8 @@ class BacktestEngine:
         symbol = params.get('data', 'symbols', 0)
         timeframe = params.get('data', 'timeframes', 0)
         strategy = params.get('strategy', 'type', default='quantum')
+        custom_test_set = params.get('backtesting', 'test_sets', 'custom_test_set', default=None)
+        test_set_only = params.get('backtesting', 'test_sets', 'test_set_only', default=False)
         
         # Check if subset testing is requested
         subset_str = self.params.get('backtesting', 'test_sets', 'subset', default=None)
@@ -79,29 +81,52 @@ class BacktestEngine:
         self.logger.info(f"Running backtest for {exchange} {symbol} {timeframe}")
         
         try:
-            # First try to load test set using DataContext
-            data_context = DataContext.from_test_set(self.params, exchange, symbol, timeframe)
-            
-            if data_context is not None:
-                self.logger.info(f"Using held-out test data from test set")
-                data_context.add_processing_step("load_test_set", {
-                    "source": "test_set"
-                })
-            else:
-                # Fall back to processed data with a warning
-                self.logger.warning(f"No test set found. Using processed data instead. "
-                        f"This may lead to overoptimistic results due to possible data leakage.")
+            # Handle custom test set if provided
+            if custom_test_set:
+                # Load custom test set into a DataContext
+                data_context = DataContext(self.params)
                 
-                data_context = DataContext.from_processed_data(self.params, exchange, symbol, timeframe)
-                
-                if data_context is None:
-                    self.logger.error(f"No processed data found for {symbol} {timeframe}")
+                # Parse the custom testset path
+                test_file = Path(custom_test_set)
+                if not test_file.exists():
+                    self.logger.error(f"Custom test data file not found at {test_file}")
                     return False
                     
-                data_context.add_processing_step("load_processed_data", {
-                    "source": "processed_data",
-                    "warning": "Using full data instead of test set could lead to data leakage"
+                # Load data into context
+                data_context.df = pd.read_csv(test_file, index_col='timestamp', parse_dates=True)
+                data_context.source = "custom_test_set"
+                data_context.add_processing_step("load_custom_test_set", {
+                    "file_path": str(test_file),
+                    "rows": len(data_context.df)
                 })
+            else:
+                # Try to load test set using DataContext
+                data_context = DataContext.from_test_set(self.params, exchange, symbol, timeframe)
+                
+                if data_context is not None:
+                    self.logger.info(f"Using held-out test data from test set")
+                    data_context.add_processing_step("load_test_set", {
+                        "source": "test_set"
+                    })
+                elif test_set_only:
+                    # If test_set_only is True and no test set is found, return False
+                    self.logger.error(f"No test set found for {symbol} {timeframe} and test_set_only=True")
+                    return False
+                else:
+                    # Fall back to processed data with a warning
+                    self.logger.warning(f"No test set found. Using processed data instead. "
+                            f"This may lead to overoptimistic results due to possible data leakage.")
+                    
+                    data_context = DataContext.from_processed_data(self.params, exchange, symbol, timeframe)
+                    
+            if data_context is None:
+                self.logger.error(f"No processed data found for {symbol} {timeframe}")
+                return False
+                
+            data_context.add_processing_step("load_processed_data", {
+                "source": "processed_data",
+                "warning": "Using full data instead of test set could lead to data leakage"
+            })
             
             # Validate data has the required columns
             if not data_context.validate(required_columns=['open', 'high', 'low', 'close', 'volume']):
@@ -158,7 +183,7 @@ class BacktestEngine:
             # TODO: implement switching between different strategies 
             # Run backtest with quantum-inspired approach
             self.logger.info(f"Running {strategy} backtest with {len(data_context.df)} samples")
-            backtest_results, metrics = self._run_quantum_backtest(data_context.df, probabilities)
+            backtest_results, metrics = self._run_quantum_backtest(data_context, probabilities)
         
             # Add data source to metrics
             metrics['data_source'] = data_context.source
@@ -167,7 +192,9 @@ class BacktestEngine:
             metrics['processing_history'] = data_context.get_processing_history()
         
             # Generate execution ID for tracking
-            execution_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{symbol}_{timeframe}"
+            is_test_data = data_context.source in ["test_set", "custom_test_set"]
+            execution_suffix = "_test_set" if is_test_data else ""
+            execution_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{symbol}_{timeframe}{execution_suffix}"
             metrics['execution_id'] = execution_id
         
             # Add final processing step
@@ -208,7 +235,7 @@ class BacktestEngine:
             
             return False
     
-    def _run_quantum_backtest(self, df, probabilities, threshold=0.382, hedge_threshold=0.5):
+    def _run_quantum_backtest(self, data_context, probabilities, threshold=0.382, hedge_threshold=0.5):
         """
         Run backtest with quantum-inspired trading approach
         
@@ -222,7 +249,7 @@ class BacktestEngine:
         position entries, exits, and hedging based on changing probability distributions.
         
         Args:
-            df (DataFrame): Price data DataFrame with OHLCV data
+            data_context (DataContext): Data context containing price DataFrame
             probabilities (ndarray): Probability array [P(short), P(no_trade), P(long)]
             threshold (float): Minimum probability to enter a position (default: 0.2)
             hedge_threshold (float): Threshold for considering hedging (default: 0.4)
@@ -230,12 +257,24 @@ class BacktestEngine:
         Returns:
             tuple: (df_backtest, metrics) - DataFrame with backtest results and performance statistics
         """
+        
+        fee_rate = self.taker_fee_rate
+        # Record backtest parameters in data context
+        data_context.add_processing_step("backtest_start", {
+            "strategy": "quantum",
+            "enter_threshold": threshold,
+            "hedge_threshold": hedge_threshold,
+            "exit_threshold": self.exit_threshold,
+            "fee_rate": fee_rate
+        })
+        
+        df = data_context.df
         df_backtest = df.copy()
         threshold = self.params.get('backtesting', 'enter_threshold', default=threshold)
         hedge_threshold = self.params.get('backtesting', 'hedge_threshold', default=hedge_threshold)
         # Different thresholds for long and short
         long_threshold = threshold
-        short_threshold = threshold*1.1382 # More conservative
+        short_threshold = threshold#*1.1382 # More conservative
         
         # Initialize columns for tracking positions and returns
         df_backtest['short_prob'] = probabilities[:, 0]  # Probability of short position
@@ -261,6 +300,12 @@ class BacktestEngine:
         entry_idx = 0  # Index of entry bar
         entry_price = 0  # Price at entry
         total_fees_paid = 0.0  # Track total fees paid
+        trade_count = 0  # Count of executed trades
+        
+        data_context.add_processing_step("backtest_columns_initialized", {
+            "position_states": "[-1=short, 0=flat, 1=long, 2=hedged]",
+            "data_rows": len(df_backtest)
+        })
         
         for i in range(1, len(df_backtest) - 1):
             current_price = df_backtest['close'].iloc[i]
@@ -280,6 +325,13 @@ class BacktestEngine:
                     entry_price = current_price
                     df_backtest.loc[df_backtest.index[i], 'position'] = 1
                     df_backtest.loc[df_backtest.index[i], 'entry_price'] = current_price
+                    trade_count += 1
+                    
+                    # Record entry fee
+                    entry_fee = fee_rate
+                    total_fees_paid += entry_fee
+                    df_backtest.loc[df_backtest.index[i], 'fee_impact'] = entry_fee
+                    df_backtest.loc[df_backtest.index[i], 'total_fees_paid'] = total_fees_paid
                 
                 elif short_prob > short_threshold:
                     # Enter short position when short probability exceeds threshold
@@ -288,6 +340,13 @@ class BacktestEngine:
                     entry_price = current_price
                     df_backtest.loc[df_backtest.index[i], 'position'] = -1
                     df_backtest.loc[df_backtest.index[i], 'entry_price'] = current_price
+                    trade_count += 1
+                    
+                    # Record entry fee
+                    entry_fee = fee_rate
+                    total_fees_paid += entry_fee
+                    df_backtest.loc[df_backtest.index[i], 'fee_impact'] = entry_fee
+                    df_backtest.loc[df_backtest.index[i], 'total_fees_paid'] = total_fees_paid
                 
                 # Handle quantum edge case: both probabilities high
                 elif long_prob > hedge_threshold and short_prob > hedge_threshold:
@@ -298,13 +357,13 @@ class BacktestEngine:
                     entry_price = current_price
                     df_backtest.loc[df_backtest.index[i], 'position'] = 2
                     df_backtest.loc[df_backtest.index[i], 'entry_price'] = current_price
-            
-                
-                # Record entry fee
-                entry_fee = self.fee_rate * abs(position)
-                total_fees_paid += entry_fee
-                df_backtest.loc[df_backtest.index[i], 'fee_impact'] = entry_fee
-                df_backtest.loc[df_backtest.index[i], 'total_fees_paid'] = total_fees_paid
+                    trade_count += 1
+                    
+                    # Record entry fee
+                    entry_fee = fee_rate * 2
+                    total_fees_paid += entry_fee
+                    df_backtest.loc[df_backtest.index[i], 'fee_impact'] = entry_fee
+                    df_backtest.loc[df_backtest.index[i], 'total_fees_paid'] = total_fees_paid
                 
             elif position == 1:  # Currently long
                 # Check for exit or hedge signals
@@ -316,12 +375,12 @@ class BacktestEngine:
                     
                     # Calculate return (accounting for fees)
                     # Return = (exit price / entry price) - 1 - round-trip fees
-                    trade_return = (current_price / entry_price) - 1 - (self.fee_rate * 2)
+                    trade_return = (current_price / entry_price) - 1 - (fee_rate * 2)
                     df_backtest.loc[df_backtest.index[i], 'trade_return'] = trade_return
                     df_backtest.loc[df_backtest.index[i], 'trade_duration'] = i - entry_idx
                 
                     # Calculate exit fee
-                    exit_fee = self.fee_rate
+                    exit_fee = fee_rate
                     total_fees_paid += exit_fee
                 
                     # Record fee impact for this exit
@@ -336,9 +395,10 @@ class BacktestEngine:
                         entry_price = current_price
                         df_backtest.loc[df_backtest.index[i], 'position'] = -1
                         df_backtest.loc[df_backtest.index[i], 'entry_price'] = current_price
+                        trade_count += 1
                     
                         # Add entry fee for new short position
-                        reversal_fee = self.fee_rate
+                        reversal_fee = fee_rate
                         total_fees_paid += reversal_fee
                         df_backtest.loc[df_backtest.index[i], 'fee_impact'] += reversal_fee
                         df_backtest.loc[df_backtest.index[i], 'total_fees_paid'] = total_fees_paid
@@ -352,7 +412,7 @@ class BacktestEngine:
                     df_backtest.loc[df_backtest.index[i], 'position'] = 2
                 
                     # Record fee for adding the short hedge
-                    hedge_fee = self.fee_rate
+                    hedge_fee = fee_rate
                     total_fees_paid += hedge_fee
                     df_backtest.loc[df_backtest.index[i], 'fee_impact'] = hedge_fee
                     df_backtest.loc[df_backtest.index[i], 'total_fees_paid'] = total_fees_paid
@@ -371,12 +431,12 @@ class BacktestEngine:
                     
                     # Calculate return (accounting for fees)
                     # Short return = 1 - (exit price / entry price) - round-trip fees
-                    trade_return = 1 - (current_price / entry_price) - (self.fee_rate * 2)
+                    trade_return = 1 - (current_price / entry_price) - (fee_rate * 2)
                     df_backtest.loc[df_backtest.index[i], 'trade_return'] = trade_return
                     df_backtest.loc[df_backtest.index[i], 'trade_duration'] = i - entry_idx
                 
                     # Calculate exit fee
-                    exit_fee = self.fee_rate
+                    exit_fee = fee_rate
                     total_fees_paid += exit_fee
                 
                     # Record fee impact for this exit
@@ -391,9 +451,10 @@ class BacktestEngine:
                         entry_price = current_price
                         df_backtest.loc[df_backtest.index[i], 'position'] = 1
                         df_backtest.loc[df_backtest.index[i], 'entry_price'] = current_price
-                    
+                        trade_count += 1
+                        
                         # Add entry fee for new long position
-                        reversal_fee = self.fee_rate
+                        reversal_fee = fee_rate
                         total_fees_paid += reversal_fee
                         df_backtest.loc[df_backtest.index[i], 'fee_impact'] += reversal_fee
                         df_backtest.loc[df_backtest.index[i], 'total_fees_paid'] = total_fees_paid
@@ -407,7 +468,7 @@ class BacktestEngine:
                     df_backtest.loc[df_backtest.index[i], 'position'] = 2
                 
                     # Record fee for adding the long hedge
-                    hedge_fee = self.fee_rate
+                    hedge_fee = fee_rate
                     total_fees_paid += hedge_fee
                     df_backtest.loc[df_backtest.index[i], 'fee_impact'] = hedge_fee
                     df_backtest.loc[df_backtest.index[i], 'total_fees_paid'] = total_fees_paid
@@ -426,12 +487,12 @@ class BacktestEngine:
                     
                     # Hedged positions typically have near-zero returns plus double fees
                     # We approximate this as the cost of the double hedging fees
-                    trade_return = -(self.fee_rate * 4)  # Approximate cost of hedging
+                    trade_return = -(fee_rate * 4)  # Approximate cost of hedging
                     df_backtest.loc[df_backtest.index[i], 'trade_return'] = trade_return
                     df_backtest.loc[df_backtest.index[i], 'trade_duration'] = i - entry_idx
                 
                     # Calculate exit fee (double fee to exit both positions)
-                    exit_fee = self.fee_rate * 2
+                    exit_fee = fee_rate * 2
                     total_fees_paid += exit_fee
                 
                     # Record fee impact for this exit
@@ -448,14 +509,14 @@ class BacktestEngine:
                     df_backtest.loc[df_backtest.index[i], 'position'] = 1
                 
                     # Fee for exiting the short side
-                    exit_fee = self.fee_rate
+                    exit_fee = fee_rate
                     total_fees_paid += exit_fee
                     df_backtest.loc[df_backtest.index[i], 'fee_impact'] = exit_fee
                     df_backtest.loc[df_backtest.index[i], 'total_fees_paid'] = total_fees_paid
     
                     # Calculate return from closing the short side of the hedge
                     # Short return = 1 - (exit price / entry price) - exit fee
-                    short_side_return = 1 - (current_price / entry_price) - (self.fee_rate * 2)
+                    short_side_return = 1 - (current_price / entry_price) - (fee_rate * 2)
     
                     # Record partial close trade return (only for short side)
                     df_backtest.loc[df_backtest.index[i], 'trade_return'] = short_side_return
@@ -469,14 +530,14 @@ class BacktestEngine:
                     df_backtest.loc[df_backtest.index[i], 'position'] = -1
                 
                     # Fee for exiting the long side
-                    exit_fee = self.fee_rate
+                    exit_fee = fee_rate
                     total_fees_paid += exit_fee
                     df_backtest.loc[df_backtest.index[i], 'fee_impact'] = exit_fee
                     df_backtest.loc[df_backtest.index[i], 'total_fees_paid'] = total_fees_paid
     
                     # Calculate return from closing the long side of the hedge
                     # Long return = (exit price / entry price) - 1 - exit fee
-                    long_side_return = (current_price / entry_price) - 1 - (self.fee_rate * 2)
+                    long_side_return = (current_price / entry_price) - 1 - (fee_rate * 2)
                     
                     # Record partial close trade return (only for long side)
                     df_backtest.loc[df_backtest.index[i], 'trade_return'] = long_side_return
@@ -494,13 +555,13 @@ class BacktestEngine:
             df_backtest.loc[df_backtest.index[i], 'exit_price'] = current_price
             
             if position == 1:  # Long position
-                trade_return = (current_price / entry_price) - 1 - (self.fee_rate * 2)
+                trade_return = (current_price / entry_price) - 1 - (fee_rate * 2)
             elif position == -1:  # Short position
-                trade_return = 1 - (current_price / entry_price) - (self.fee_rate * 2)
+                trade_return = 1 - (current_price / entry_price) - (fee_rate * 2)
             else:  # Hedged position
-                trade_return = -(self.fee_rate * 4)  # Approximate cost of hedging
+                trade_return = -(fee_rate * 4)  # Approximate cost of hedging
             
-            exit_fee = self.fee_rate * abs(position)
+            exit_fee = fee_rate * abs(position)
             
             # Record final trade details
             total_fees_paid += exit_fee
@@ -509,6 +570,15 @@ class BacktestEngine:
             df_backtest.loc[df_backtest.index[i], 'total_fees_paid'] = total_fees_paid
             df_backtest.loc[df_backtest.index[i], 'trade_return'] = trade_return
             df_backtest.loc[df_backtest.index[i], 'trade_duration'] = i - entry_idx
+        
+        # Track completion of trading simulation
+        data_context.add_processing_step("trading_simulation_complete", {
+            "total_position_updates": len(df_backtest),
+            "initial_position": 0,
+            "final_position": position,
+            "total_trades_entered": trade_count,
+            "total_fees_paid": total_fees_paid
+        })
         
         # Initialize strategy returns
         df_backtest['bar_return'] = 0.0
@@ -535,6 +605,18 @@ class BacktestEngine:
         # Count hedged positions (position=2) as both long and short 
         hedged_trades_count = len(trades[trades['closed_position_type'] == 2])
         
+        # Record metrics for return calculation
+        data_context.add_processing_step("return_calculation_complete", {
+            "trades_closed": len(trades),
+            "final_return": df_backtest['strategy_cumulative'].iloc[-1],
+            "total_fee_drag": overall_fee_drag,
+            "final_portfolio_value": 1 + df_backtest['strategy_cumulative'].iloc[-1] if len(df_backtest) > 0 else 1.0
+        })
+        
+        # Calculate prediction accuracy if target exists
+        target_accuracy = 0
+        class_accuracy = {}
+        
         # Calculate prediction accuracy if target exists
         if 'target' in df.columns:
             # For each step, check if position matches target
@@ -560,9 +642,14 @@ class BacktestEngine:
                         class_match = target_class['target_match'].mean()
                         class_accuracy[f'target_{target_value}_accuracy'] = class_match
                         class_accuracy[f'target_{target_value}_count'] = len(target_class)
-        
+                # Record target accuracy metrics
+                data_context.add_processing_step("target_accuracy_calculated", {
+                    "overall_accuracy": target_accuracy,
+                    "class_accuracies": class_accuracy
+                })
+                
         metrics = {
-            'total_trades': len(trades),
+            'total_trades': trade_count,
             'long_trades': len(trades[trades['closed_position_type'] == 1]) + hedged_trades_count,
             'short_trades': len(trades[trades['closed_position_type'] == -1]) + hedged_trades_count,
             'hedged_trades': hedged_trades_count,
@@ -589,14 +676,25 @@ class BacktestEngine:
             if 'accuracy' in k:
                 self.logger.info(f"{k}: {v:.2%}")
         
+        # Final record of backtest completion with key metrics
+        data_context.add_processing_step("backtest_complete", {
+            "total_trades": metrics['total_trades'],
+            "win_rate": metrics['win_rate'],
+            "final_return": metrics['final_return'],
+            "profit_factor": metrics['profit_factor']
+        })
+        
         return df_backtest, metrics
         
     def run_multi_test(self):
         """
         Run backtest across multiple symbols and timeframes using the latest trained model
         
+        This method systematically tests model performance across all configured symbols
+        and timeframes, leveraging DataContext for proper data tracking and provenance.
+        
         Returns:
-            dict: Results dictionary or False if error
+            dict: Results dictionary organized by exchange, symbol, and timeframe
         """
         
         # Store symbols and timeframes in params
@@ -606,6 +704,16 @@ class BacktestEngine:
         
         self.logger.info(f"Running multi-symbol backtest for {len(symbols)} symbols and {len(timeframes)} timeframes")
         
+        # Create a master DataContext for tracking the multi-test process
+        master_context = DataContext(self.params)
+        master_context.source = "multi_test"
+        master_context.add_processing_step("multi_test_started", {
+            "symbols": symbols,
+            "timeframes": timeframes,
+            "exchanges": exchanges,
+            "timestamp": datetime.now().isoformat()
+        })
+        
         # Define a dictionary to store results
         all_results = {}
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -613,45 +721,65 @@ class BacktestEngine:
         # Run backtest for each exchange/symbol/timeframe
         for exchange in exchanges:
             exchange_results = {}
+            
             for symbol in symbols:
                 symbol_results = {}
+                
                 for timeframe in timeframes:
                     try:
-                        # Use the existing run_test method for each combination
+                        # Log current test
                         self.logger.info(f"Testing {exchange} {symbol} {timeframe}")
                 
                         # Update params for this specific symbol/timeframe for model loading
                         self.params.set([symbol], 'data', 'symbols')
                         self.params.set([timeframe], 'data', 'timeframes')
-                
+                        self.params.set([exchange], 'data', 'exchanges')
+                        
                         # Run the individual backtest
                         #TODO: run_test() called by multitest should not save and plot test results for each symbol/timeframe/exchange 
-                        backtest_results, metrics = self.run_test(exchange, symbol, timeframe)
+                        backtest_results, metrics = self.run_test()
                 
                         if backtest_results is False:
                             self.logger.warning(f"Backtest failed for {symbol} {timeframe}")
+                            master_context.add_processing_step("test_failed", {
+                                "exchange": exchange,
+                                "symbol": symbol,
+                                "timeframe": timeframe,
+                                "reason": "Backtest execution failure"
+                            })
                             continue
-                
-                        # Ensure data_source is in metrics (in case run_test doesn't include it)
-                        if 'data_source' not in metrics:
-                            # Check if test file exists to determine source
-                            symbol_safe = symbol.replace('/', '_')
-                            test_file = Path(f"data/test_sets/{exchange}/{symbol_safe}/{timeframe}_test.csv")
-                            metrics['data_source'] = "test_set" if test_file.exists() else "full_data"
                     
-                    # Store results and include data source from metrics
-                        data_source = metrics.get('data_source', 'unknown')
-                
+                        # Record successful test in master context
+                        master_context.add_processing_step("test_completed", {
+                            "exchange": exchange,
+                            "symbol": symbol,
+                            "timeframe": timeframe,
+                            "data_source": metrics.get('data_source', 'unknown'),
+                            "final_return": metrics.get('final_return', 0),
+                            "sharpe_ratio": metrics.get('sharpe_ratio', 0)
+                        })
+                    
+                        # Store results in dictionary
                         symbol_results[timeframe] = {
                             'results': backtest_results,
                             'metrics': metrics,
-                            'data_source': data_source
+                            'data_source': metrics.get('data_source', 'unknown')
                         }
                 
                     except Exception as e:
                         self.logger.error(f"Error during backtest of {symbol} {timeframe}: {str(e)}")
                         import traceback
-                        self.logger.error(traceback.format_exc())
+                        error_trace = traceback.format_exc()
+                        self.logger.error(error_trace)
+                    
+                        # Record error in master context
+                        master_context.add_processing_step("test_error", {
+                            "exchange": exchange,
+                            "symbol": symbol,
+                            "timeframe": timeframe,
+                            "error": str(e),
+                            "traceback": error_trace
+                        })
                         continue
                 
                 if symbol_results:
@@ -659,68 +787,35 @@ class BacktestEngine:
                 
             if exchange_results:
                 all_results[exchange] = exchange_results
+    
+        # Record completion in master context
+        successful_tests = sum(len(exchange_results[symbol]) 
+                            for exchange in all_results 
+                            for symbol in all_results[exchange])
+    
+        total_tests = len(exchanges) * len(symbols) * len(timeframes)
+        success_rate = successful_tests / total_tests if total_tests > 0 else 0
+        
+        master_context.add_processing_step("multi_test_complete", {
+            "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            "successful_tests": successful_tests, 
+            "total_tests": total_tests,
+            "success_rate": success_rate
+        })
         
         # Create a summary report if we have results
         if all_results:
-            self.result_logger.create_multi_summary(all_results, timestamp)
+            # Include master context processing history in summary
+            summary_meta = {
+                "processing_history": master_context.get_processing_history(),
+                "success_rate": success_rate,
+                "timestamp": timestamp
+            }
+            self.result_logger.create_multi_summary(all_results, timestamp, metadata=summary_meta)
         else:
             self.logger.warning("No successful backtests to summarize")
         
         return all_results
-
-    def run_test_on_test_set(self, custom_testset=None):
-        """
-        Run backtest strictly on test set data to ensure unbiased evaluation
-        """
-        symbol = self.params.get('data', 'symbols', 0)
-        timeframe = self.params.get('data', 'timeframes', 0)
-        exchange = self.params.get('data', 'exchanges', 0)
-        testset_path = self.params.get('backtest', 'testsets', 'path')
-        
-        self.logger.info(f"Running backtest on test set for {exchange} {symbol} {timeframe}")
-        
-        try:
-            # Load the test data specifically
-            symbol_safe = symbol.replace('/', '_')
-            test_file = Path(f"{testset_path}/{custom_testset}") or Path(f"{testset_path}/{exchange}/{symbol_safe}/{timeframe}_test.csv")
-            
-            if not test_file.exists():
-                self.logger.error(f"Test data file not found at {test_file}. Please run training first.")
-                return False
-                
-            test_df = pd.read_csv(test_file, index_col='timestamp', parse_dates=True)
-            self.logger.info(f"Loaded test set with {len(test_df)} samples")
-            
-            # Load model
-            model_factory = ModelFactory(self.params)
-            model = model_factory.create_model()
-            
-            if not model.load_model():
-                self.logger.error("Failed to load model for backtesting")
-                return False
-            
-            # Run predictions using the trained model
-            probabilities = model.predict_probabilities(test_df)
-            
-            if probabilities is None:
-                self.logger.error("Failed to get predictions for backtesting")
-                return False
-            
-            # Run backtest with quantum-inspired approach on test data only
-            backtest_results, metrics = self._run_quantum_backtest(test_df, probabilities)
-            
-            metrics['data_source'] = "test_set"  # Track the data source
-            
-            # Save and plot results
-            self.result_logger.save_results(backtest_results, metrics)
-            self.result_logger.plot_results(backtest_results, metrics)
-            
-            # Return results
-            return backtest_results, metrics
-            
-        except Exception as e:
-            self.logger.error(f"Error during test set backtesting: {str(e)}")
-            return False
         
     def run_position_sizing_test(self, no_trade_threshold=0.96, min_position_change=0.025):
         """
@@ -746,307 +841,135 @@ class BacktestEngine:
         timeframe = params.get('data', 'timeframes', 0)
         strategy = params.get('strategy', 'type', default='quantum')
         
-        test_sets_path = self.params.get('backtesting', 'test_sets', 'path', default='data/test_sets')
-
         self.logger.info(f"Running position sizing test for {exchange} {symbol} {timeframe}")
         
         try:
-            # Check for test data first
-            symbol_safe = symbol.replace('/', '_')
-            test_file = Path(f"{test_sets_path}/{exchange}/{symbol_safe}/{timeframe}_test.csv")
+            # First try to load test set using DataContext
+            data_context = DataContext.from_test_set(self.params, exchange, symbol, timeframe)
             
-            # If test data exists, use it (preferred for proper evaluation)
-            if test_file.exists():
-                self.logger.info(f"Using held-out test data from {test_file}")
-                df = pd.read_csv(test_file, index_col='timestamp', parse_dates=True)
-                data_source = "test_set"  # Track the data source
+            if data_context is not None:
+                self.logger.info(f"Using held-out test data for position sizing test")
+                data_context.add_processing_step("load_test_set", {
+                    "source": "test_set",
+                    "test_type": "position_sizing"
+                })
             else:
                 # Fall back to processed data with a warning
-                self.logger.warning(f"No test set found at {test_file}. Using processed data instead. "
+                self.logger.warning(f"No test set found. Using processed data instead. "
                         f"This may lead to overoptimistic results due to possible data leakage.")
                 
-                input_file = Path(f"data/processed/{exchange}/{symbol_safe}/{timeframe}.csv")
+                data_context = DataContext.from_processed_data(self.params, exchange, symbol, timeframe)
                 
-                if not input_file.exists():
-                    self.logger.error(f"No processed data file found at {input_file}")
+                if data_context is None:
+                    self.logger.error(f"No processed data found for {symbol} {timeframe}")
                     return False
                     
-                df = pd.read_csv(input_file, index_col='timestamp', parse_dates=True)
-                data_source = "full_data"  # Track the data source
+                data_context.add_processing_step("load_processed_data", {
+                    "source": "processed_data",
+                    "warning": "Using full data instead of test set could lead to data leakage",
+                    "test_type": "position_sizing"
+                })
+                
+            # Validate data has the required columns
+            if not data_context.validate(required_columns=['open', 'high', 'low', 'close', 'volume']):
+                self.logger.error("Data validation failed - missing required columns")
+                return False
+            
+            # Make sure the dataframe is sorted by timestamp
+            if not data_context.df.index.is_monotonic_increasing:
+                data_context.df = data_context.df.sort_index()
+                data_context.add_processing_step("sort_index", {
+                    "reason": "Ensure chronological order for backtesting"
+                })
             
             # Load model through the model factory
             model_factory = ModelFactory(self.params)
             model = model_factory.create_model()
             
             if not model.load_model():
-                self.logger.error("Failed to load model for backtesting")
+                self.logger.error("Failed to load model for position sizing test")
+                data_context.add_processing_step("model_load_error", {
+                    "error": "Failed to load model for position sizing test"
+                })
+                return False
+        
+            data_context.add_processing_step("model_loaded", {
+                "model_type": self.params.get('model', 'type', default='auto'),
+                "strategy": strategy
+            })
+            
+            # Record position sizing parameters
+            data_context.add_processing_step("position_sizing_params", {
+                "no_trade_threshold": no_trade_threshold,
+                "min_position_change": min_position_change
+            })
+        
+            # Check if the model class has the position sizing method
+            if not hasattr(model, 'run_backtest_with_position_sizing'):
+                self.logger.error("Model does not support position sizing backtest")
+                data_context.add_processing_step("position_sizing_error", {
+                    "error": "Model does not support position sizing backtest"
+                })
                 return False
             
-            # Run backtest with position sizing (delegates to the model's method)
-            # Check if the model class has the position sizing method
-            if hasattr(model, 'run_backtest_with_position_sizing'):
+            # Run position sizing backtest, passing the DataContext
+            # If the model doesn't accept DataContext directly, we can pass the DataFrame
+            if 'data_context' in model.run_backtest_with_position_sizing.__code__.co_varnames:
+                # Model accepts DataContext
                 return_value = model.run_backtest_with_position_sizing(
-                    df, 
+                    data_context,
                     no_trade_threshold=no_trade_threshold,
                     min_position_change=min_position_change
                 )
-                
-                # Handle different return formats
-                if isinstance(return_value, tuple):
-                    if len(return_value) == 2:
-                        # Model only returned results and metrics, no figure
-                        results, metrics = return_value
-                        fig = None
-                    else:
-                        # Model returned all three values
-                        results, metrics, fig = return_value
-                else:
-                    # Model returned a single value or False
-                    return return_value
-                
-                # Add data source information
-                if isinstance(metrics, dict):
-                    metrics['data_source'] = data_source
-                
-                return results, metrics, fig
             else:
-                self.logger.error("Model does not support position sizing backtest")
-                return False
+                # Model only accepts DataFrame
+                return_value = model.run_backtest_with_position_sizing(
+                    data_context.df,
+                    no_trade_threshold=no_trade_threshold,
+                    min_position_change=min_position_change
+                )
+            
+            # Handle different return formats
+            if isinstance(return_value, tuple):
+                if len(return_value) == 2:
+                    # Model only returned results and metrics, no figure
+                    results, metrics = return_value
+                    fig = None
+                else:
+                    # Model returned all three values
+                    results, metrics, fig = return_value
+            else:
+                # Model returned a single value or False
+                data_context.add_processing_step("backtest_error", {
+                    "error": "Model returned invalid response format"
+                })
+                return return_value
+                
+            # Add data source information
+            if isinstance(metrics, dict):
+                metrics['data_source'] = data_context.source
+                
+                # Add processing history to metrics for full reproducibility
+                metrics['processing_history'] = data_context.get_processing_history()
+            
+                # Generate execution ID for tracking
+                execution_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{symbol}_{timeframe}_position_sizing"
+                metrics['execution_id'] = execution_id
+            
+                # Add final processing step
+                data_context.add_processing_step("position_sizing_complete", {
+                    "execution_id": execution_id,
+                    "final_return": metrics.get('total_return', 0),
+                    "sharpe_ratio": metrics.get('sharpe_ratio', 0),
+                    "position_changes": metrics.get('num_position_changes', 0)
+                })
+            
+            return results, metrics, fig
         
         except Exception as e:
             self.logger.error(f"Error during position sizing test: {str(e)}")
             import traceback
             self.logger.error(traceback.format_exc())
-            return False
-
-
-    def run_multi_position_sizing_test(self, symbols, timeframes, exchange='binance',
-                                    no_trade_threshold=0.96, min_position_change=0.05):
-        """
-        Run position sizing tests across multiple symbols and timeframes
-        
-        Args:
-            symbols (list): List of trading pair symbols
-            timeframes (list): List of timeframes to test
-            exchange (str): Exchange name
-            no_trade_threshold (float): Threshold for no_trade probability
-            min_position_change (float): Minimum position change threshold
-                
-        Returns:
-            dict: Dictionary of results for all symbols and timeframes
-        """
-        self.logger.info(f"Running multi-symbol position sizing tests: {symbols}, {timeframes}")
-        
-        # Dictionary to store all results
-        all_results = {}
-        
-        # Process each symbol
-        for symbol in symbols:
-            symbol_results = {}
-            
-            # Process each timeframe for this symbol
-            for timeframe in timeframes:
-                self.logger.info(f"Running position sizing test for {symbol} {timeframe}")
-                
-                try:
-                    # Run position sizing test for this symbol/timeframe
-                    results, metrics, fig = self.run_position_sizing_test(
-                        exchange=exchange,
-                        symbol=symbol,
-                        timeframe=timeframe,
-                        no_trade_threshold=no_trade_threshold,
-                        min_position_change=min_position_change
-                    )
-                    
-                    # Store results if successful
-                    if results is not False:
-                        symbol_results[timeframe] = {
-                            'results': results,
-                            'metrics': metrics,
-                            'fig': fig
-                        }
-                        
-                except Exception as e:
-                    self.logger.error(f"Error in position sizing test for {symbol} {timeframe}: {str(e)}")
-                    import traceback
-                    self.logger.error(traceback.format_exc())
-                    continue
-            
-            # Store all timeframe results for this symbol
-            if symbol_results:
-                all_results[symbol] = symbol_results
-        
-        # Create a summary report comparing performance across symbols and timeframes
-        if all_results:
-            self._create_position_sizing_summary(all_results, symbols, timeframes)
-            self.logger.info(f"Multi-symbol position sizing tests complete for {len(all_results)} symbols")
-        else:
-            self.logger.warning("No valid results were generated in multi-symbol position sizing tests")
-        
-        return all_results
-
-
-    def _create_position_sizing_summary(self, all_results, symbols, timeframes):
-        """
-        Create summary report for multi-symbol position sizing tests
-        
-        Args:
-            all_results (dict): Results dictionary
-            symbols (list): List of symbols
-            timeframes (list): List of timeframes
-                
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        try:
-            # Create a DataFrame for summary metrics
-            summary_rows = []
-            
-            for symbol in symbols:
-                if symbol not in all_results:
-                    continue
-                    
-                for timeframe in timeframes:
-                    if timeframe not in all_results[symbol]:
-                        continue
-                    
-                    # Get performance metrics
-                    metrics = all_results[symbol][timeframe]['metrics']
-                    
-                    summary_rows.append({
-                        'symbol': symbol,
-                        'timeframe': timeframe,
-                        'data_source': metrics.get('data_source', 'unknown'),
-                        'total_return': metrics.get('total_return', 0),
-                        'alpha': metrics.get('alpha', 0),
-                        'sharpe_ratio': metrics.get('sharpe_ratio', 0),
-                        'max_drawdown': metrics.get('max_drawdown', 0),
-                        'win_rate': metrics.get('win_rate', 0),
-                        'profit_factor': metrics.get('profit_factor', 0),
-                        'num_position_changes': metrics.get('num_position_changes', 0),
-                        'fee_drag': metrics.get('fee_drag', 0)
-                    })
-            
-            if not summary_rows:
-                self.logger.warning("No summary data available")
-                return False
-            
-            # Convert to DataFrame
-            summary_df = pd.DataFrame(summary_rows)
-            
-            # Save summary
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            model_type = self.params.get('model', 'type')
-            output_dir = Path(f"data/backtest_results/{symbol}/{timeframe}/{model_type}/summary")
-            output_dir.mkdir(parents=True, exist_ok=True)
-            
-            summary_file = output_dir / f"pos_sizing_summary_{timestamp}.csv"
-            summary_df.to_csv(summary_file, index=False)
-            
-            # Create summary visualizations
-            self._plot_position_sizing_summary(summary_df, output_dir, timestamp)
-            
-            self.logger.info(f"Saved position sizing summary report to {summary_file}")
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Error creating position sizing summary report: {str(e)}")
-            return False
-
-
-    def _plot_position_sizing_summary(self, summary_df, output_dir, timestamp):
-        """
-        Create summary visualizations for position sizing tests
-        
-        Args:
-            summary_df (DataFrame): Summary DataFrame with performance metrics
-            output_dir (Path): Directory to save plots
-            timestamp (str): Timestamp string for filenames
-            
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        try:
-            # Plot 1: Returns by symbol
-            plt.figure(figsize=(12, 6))
-            
-            # Group by symbol and calculate mean return
-            symbol_returns = summary_df.groupby('symbol')['total_return'].mean().sort_values(ascending=False) * 100
-            
-            # Create bar chart
-            plt.bar(symbol_returns.index, symbol_returns.values)
-            plt.axhline(y=0, color='r', linestyle='-', alpha=0.3)
-            
-            plt.title('Average Return by Symbol (Position Sizing)')
-            plt.xlabel('Symbol')
-            plt.ylabel('Return (%)')
-            plt.xticks(rotation=45)
-            
-            # Add text annotations
-            for i, v in enumerate(symbol_returns):
-                plt.text(i, v + 1, f'{v:.2f}%',
-                        ha='center', va='bottom',
-                        color='green' if v > 0 else 'red')
-            
-            plt.tight_layout()
-            returns_file = output_dir / f"pos_sizing_returns_by_symbol_{timestamp}.png"
-            plt.savefig(returns_file)
-            plt.close()
-            
-            # Plot 2: Sharpe ratio comparison
-            plt.figure(figsize=(12, 6))
-            
-            # Group by symbol and calculate mean Sharpe
-            symbol_sharpe = summary_df.groupby('symbol')['sharpe_ratio'].mean().sort_values(ascending=False)
-            
-            plt.bar(symbol_sharpe.index, symbol_sharpe.values)
-            plt.axhline(y=1, color='r', linestyle='--', alpha=0.3, label='Min acceptable')
-            
-            plt.title('Average Sharpe Ratio by Symbol (Position Sizing)')
-            plt.xlabel('Symbol')
-            plt.ylabel('Sharpe Ratio')
-            plt.xticks(rotation=45)
-            plt.legend()
-            
-            # Add text annotations
-            for i, v in enumerate(symbol_sharpe):
-                plt.text(i, v + 0.1, f'{v:.2f}',
-                        ha='center', va='bottom',
-                        color='green' if v > 1 else 'red')
-            
-            plt.tight_layout()
-            sharpe_file = output_dir / f"pos_sizing_sharpe_by_symbol_{timestamp}.png"
-            plt.savefig(sharpe_file)
-            plt.close()
-            
-            # Plot 3: Fee drag comparison
-            plt.figure(figsize=(12, 6))
-            
-            # Group by symbol and calculate mean fee drag
-            symbol_fees = summary_df.groupby('symbol')['fee_drag'].mean().sort_values() * 100
-            
-            plt.bar(symbol_fees.index, symbol_fees.values)
-            
-            plt.title('Fee Drag by Symbol (Position Sizing)')
-            plt.xlabel('Symbol')
-            plt.ylabel('Fee Drag (%)')
-            plt.xticks(rotation=45)
-            
-            # Add text annotations
-            for i, v in enumerate(symbol_fees):
-                plt.text(i, v + 0.01, f'{v:.3f}%',
-                        ha='center', va='bottom')
-            
-            plt.tight_layout()
-            fee_file = output_dir / f"pos_sizing_fee_drag_by_symbol_{timestamp}.png"
-            plt.savefig(fee_file)
-            plt.close()
-            
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Error creating position sizing summary plots: {str(e)}")
-            # Continue execution even if plotting fails
             return False
         
     def run_target_backtest(self):
@@ -1064,41 +987,52 @@ class BacktestEngine:
         exchange = params.get('data', 'exchanges', 0)
         symbol = params.get('data', 'symbols', 0)
         timeframe = params.get('data', 'timeframes', 0)
-        test_sets_path = self.params.get('backtesting', 'test_sets', 'path', default='data/test_sets')
-        processed_path = self.params.get('data', 'processed', 'path', default='data/processed')
         
         self.logger.info(f"Running target quality backtest for {exchange} {symbol} {timeframe}")
         
         try:
-            # Check for test data first
-            symbol_safe = symbol.replace('/', '_')
-            test_file = Path(f"{test_sets_path}/{exchange}/{symbol_safe}/{timeframe}_test.csv")
+            # Create a DataContext for the target backtest
+            data_context = DataContext.from_test_set(self.params, exchange, symbol, timeframe)
             
-            # If test data exists, use it
-            if test_file.exists():
-                self.logger.info(f"Using held-out test data from {test_file}")
-                df = pd.read_csv(test_file, index_col='timestamp', parse_dates=True)
-                data_source = "test_set"
+            if data_context is not None:
+                self.logger.info(f"Using held-out test data for target backtest")
+                data_context.add_processing_step("load_test_set", {
+                    "source": "test_set",
+                    "test_type": "target_backtest"
+                })
             else:
                 # Fall back to processed data with a warning
-                self.logger.warning(f"No test set found at {test_file}. Using processed data instead.")
+                self.logger.warning(f"No test set found. Using processed data instead. "
+                        f"This may lead to overoptimistic results due to possible data leakage.")
                 
-                input_file = Path(f"{processed_path}/{exchange}/{symbol_safe}/{timeframe}.csv")
+                data_context = DataContext.from_processed_data(self.params, exchange, symbol, timeframe)
                 
-                if not input_file.exists():
-                    self.logger.error(f"No processed data file found at {input_file}")
+                if data_context is None:
+                    self.logger.error(f"No processed data found for {symbol} {timeframe}")
                     return False
-                    
-                df = pd.read_csv(input_file, index_col='timestamp', parse_dates=True)
-                data_source = "full_data"
-            
+                
+                data_context.add_processing_step("load_processed_data", {
+                    "source": "processed_data",
+                    "warning": "Using full data instead of test set could lead to data leakage",
+                    "test_type": "target_backtest"
+                })
+        
             # Make sure the dataframe is sorted by timestamp
-            df = df.sort_index()
+            if not data_context.df.index.is_monotonic_increasing:
+                data_context.df = data_context.df.sort_index()
+                data_context.add_processing_step("sort_index", {
+                    "reason": "Ensure chronological order for backtesting"
+                })
             
             # Verify that target exists in the DataFrame
-            if 'target' not in df.columns:
+            if 'target' not in data_context.df.columns:
                 self.logger.error("Missing 'target' column in data")
+                data_context.add_processing_step("validation_failed", {
+                    "reason": "Missing 'target' column in data"
+                })
                 return False
+            
+            df = data_context.df
             
             # Create "perfect predictions" from the actual targets
             # Convert from single target column (-1, 0, 1) to probability array format
@@ -1116,13 +1050,23 @@ class BacktestEngine:
         
             # Let's add a histogram of the probabilities we're using
             target_counts = df['target'].value_counts()
+            data_context.add_processing_step("target_distribution", {
+                "distribution": target_counts,
+                "total_rows": len(df)
+            })
             self.logger.info(f"Target distribution before running backtest: {target_counts.to_dict()}")
             
+            # Record that we're using perfect predictions
+            data_context.add_processing_step("perfect_predictions_generated", {
+                "method": "target_to_probabilities",
+                "description": "Converting targets to perfect probability predictions (p=1.0 for target class)"
+            })
+            
             # Run backtest with "perfect" predictions
-            backtest_results, metrics = self._run_quantum_backtest(df, probabilities)
+            backtest_results, metrics = self._run_quantum_backtest(data_context, probabilities)
         
             # Add data source and label this as a target backtest
-            metrics['data_source'] = data_source
+            metrics['data_source'] = data_context.source
             metrics['backtest_type'] = 'target_quality'
             metrics['strategy_type'] = 'quantum'
         
@@ -1137,6 +1081,10 @@ class BacktestEngine:
                 # Get the target and actual position
                 target = df['target'].iloc[i]
                 position = backtest_results['position'].iloc[i]
+            
+                # Skip NaN targets
+                if pd.isna(target):
+                    continue
                 
                 # Check if we expect a trade here
                 if target != 0:  # Should be in a position
@@ -1164,12 +1112,22 @@ class BacktestEngine:
             if 'position' in backtest_results.columns:
                 position_changes = (backtest_results['position'] != backtest_results['position'].shift(1)).sum()
                 metrics['position_changes'] = position_changes
-                
+            
                 # Check position stability - how often positions match targets
-                target_position_match = ((df['target'] == 1) & (backtest_results['position'] == 1)) | \
-                                        ((df['target'] == -1) & (backtest_results['position'] == -1)) | \
-                                        ((df['target'] == 0) & (backtest_results['position'] == 0))
-                metrics['target_position_match_rate'] = target_position_match.mean()
+                # First create mask for valid targets (not NaN)
+                valid_targets = ~df['target'].isna()
+            
+                # Then calculate matches only for valid targets
+                target_position_match = (
+                    (valid_targets & (df['target'] == 1) & (backtest_results['position'] == 1)) | 
+                    (valid_targets & (df['target'] == -1) & (backtest_results['position'] == -1)) | 
+                    (valid_targets & (df['target'] == 0) & (backtest_results['position'] == 0))
+                )
+            
+                if valid_targets.sum() > 0:
+                    metrics['target_position_match_rate'] = target_position_match.sum() / valid_targets.sum()
+                else:
+                    metrics['target_position_match_rate'] = 0
         
             # DIAGNOSTIC: Check position distribution in trades
             trades = backtest_results[~backtest_results['trade_return'].isna()]
@@ -1183,37 +1141,74 @@ class BacktestEngine:
                 self.logger.warning(f"Found trades with unexpected position values: {unknown_positions}")
                 for pos in unknown_positions:
                     metrics[f'unknown_pos_{pos}_trades'] = position_counts.get(pos, 0)
+        
+            # Add diagnostic metrics to data context
+            data_context.add_processing_step("target_diagnostics", {
+                "expected_trades": expected_trades,
+                "signal_followed": signal_followed,
+                "signal_ignored": signal_ignored,
+                "trade_mismatch": trade_mismatch,
+                "target_efficiency": metrics['target_efficiency'],
+                "position_changes": metrics.get('position_changes', 0),
+                "target_position_match_rate": metrics.get('target_position_match_rate', 0)
+            })
+        
+            # Add processing history to metrics
+            metrics['processing_history'] = data_context.get_processing_history()
             
-            # DIAGNOSTIC: Check target distribution vs trade counts
-            target_counts = df['target'].value_counts().to_dict()
+            # Generate execution ID for tracking
+            execution_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{symbol}_{timeframe}_target_backtest"
+            metrics['execution_id'] = execution_id
+            
+            # Add final step to data context
+            data_context.add_processing_step("target_backtest_complete", {
+                "execution_id": execution_id,
+                "total_trades": metrics['total_trades'],
+                "win_rate": metrics['win_rate'],
+                "final_return": metrics['final_return']
+            })
+            
+            # DIAGNOSTIC: Log target distribution vs trade counts
             self.logger.info(f"Target distribution in data: {target_counts}")
             self.logger.info(f"Trade counts in backtest: long={metrics.get('long_trades', 0)}, " + 
-                                f"short={metrics.get('short_trades', 0)}, no_trade=N/A")
+                            f"short={metrics.get('short_trades', 0)}, no_trade=N/A")
             
             # Save and plot results
-            self.result_logger.save_results(backtest_results, metrics)
-            self.result_logger.plot_results(backtest_results, metrics)
+            self.result_logger.save_results(backtest_results, metrics, strategy_type="target_backtest")
+            self.result_logger.plot_results(backtest_results, metrics, strategy_type="target_backtest")
             
-            # Deep dive into the trades with low win rate
+            # Log some sample losing trades for inspection
             losing_trades = backtest_results[(backtest_results['trade_return'] < 0) & (~backtest_results['trade_return'].isna())]
             
-            # Sample a few losing trades for inspection
-            sample_losing = losing_trades.head(5)
-            
-            self.logger.info("Sample of losing trades:")
-            for idx, row in sample_losing.iterrows():
-                target = df.loc[idx, 'target']
-                pos = row['position']
-                entry = row['entry_price']
-                exit_p = row['exit_price']
-                ret = row['trade_return']
+            if not losing_trades.empty:
+                # Sample a few losing trades for inspection
+                sample_losing = losing_trades.head(5)
                 
-                self.logger.info(f"Target: {target}, Position: {pos}, Entry: {entry}, Exit: {exit_p}, Return: {ret:.4f}")
+                self.logger.info("Sample of losing trades:")
+                for idx, row in sample_losing.iterrows():
+                    target = df.loc[idx, 'target']
+                    pos = row['position']
+                    entry = row['entry_price']
+                    exit_p = row['exit_price']
+                    ret = row['trade_return']
+                    
+                    self.logger.info(f"Target: {target}, Position: {pos}, Entry: {entry}, Exit: {exit_p}, Return: {ret:.4f}")
+            else:
+                self.logger.info("No losing trades found in target backtest - perfect performance")
             
             return backtest_results, metrics
             
         except Exception as e:
             self.logger.error(f"Error during target backtest: {str(e)}")
             import traceback
-            self.logger.error(traceback.format_exc())
+            error_trace = traceback.format_exc()
+            self.logger.error(error_trace)
+            
+            # If we have a data context, record the error
+            if 'data_context' in locals():
+                data_context.add_processing_step("target_backtest_error", {
+                    "error": str(e),
+                    "traceback": error_trace
+                })
+            
             return False

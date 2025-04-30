@@ -134,7 +134,7 @@ model:
 
 # Exchange Configuration
 exchange:
-  fee_rate: 0.0006  # Per-side fee rate
+  taker_fee_rate: 0.0006  # Per-side taker fee rate
 ```
 
 4. Modular Configuration Files 
@@ -313,7 +313,7 @@ from src.utils.param_manager import ParamManager
 params = ParamManager.get_instance()
 
 # Access parameters with defaults
-fee_rate = params.get('exchange', 'fee_rate', default=0.0006)
+taker_fee_rate = params.get('exchange', 'taker_fee_rate', default=0.0006)
 symbols = params.get('data', 'symbols')
 
 # Access with type conversion
@@ -459,8 +459,9 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - More models, better models!
 - ✅ Centralized parameter management
 - Data Context
-- Check Multi-symbol/timeframe training and backtesting
+- Automaticaly break the data into trending segments  
+- Proper pathing from config everywhere
 - Base Model class to handle basic methods across all the models
 - Agile feature engineering infrastructure
+- Check Multi-symbol/timeframe training and backtesting
 - Better plotting utils
-- Proper pathing from config everywhere
