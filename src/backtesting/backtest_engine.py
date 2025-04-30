@@ -45,7 +45,7 @@ class BacktestEngine:
         # Extract fee rate from config or use default value
         # Extract fee rate and thresholds from params
         self.taker_fee_rate = self.params.get('exchange', 'taker_fee_rate', default=0.0006)
-        self.exit_threshold = self.params.get('backtesting', 'exit_threshold', default=0.3)
+        self.exit_threshold = self.params.get('strategy', 'exit_threshold', default=0.3)
         
         # Create result logger instance for consistent output
         self.result_logger = ResultLogger(params)
@@ -82,7 +82,7 @@ class BacktestEngine:
         
         try:
             # Handle custom test set if provided
-            if custom_test_set:
+            if custom_test_set and custom_test_set != 'None':
                 # Load custom test set into a DataContext
                 data_context = DataContext(self.params)
                 
@@ -235,7 +235,7 @@ class BacktestEngine:
             
             return False
     
-    def _run_quantum_backtest(self, data_context, probabilities, threshold=0.382, hedge_threshold=0.5):
+    def _run_quantum_backtest(self, data_context, probabilities, threshold=0.52, hedge_threshold=0.5):
         """
         Run backtest with quantum-inspired trading approach
         
@@ -259,22 +259,35 @@ class BacktestEngine:
         """
         
         fee_rate = self.taker_fee_rate
+        stop_loss = self.params.get('strategy', 'stop_loss', default=0)
+    
+        # Get risk-reward ratio from params (default to 1:1)
+        risk_reward_ratio = self.params.get('strategy', 'risk_reward_ratio', default=1)
+        # Calculate take profit based on stop loss and R:R ratio
+        take_profit = stop_loss * risk_reward_ratio
+        
         # Record backtest parameters in data context
         data_context.add_processing_step("backtest_start", {
             "strategy": "quantum",
             "enter_threshold": threshold,
             "hedge_threshold": hedge_threshold,
             "exit_threshold": self.exit_threshold,
-            "fee_rate": fee_rate
+            "fee_rate": fee_rate,
+            "stop_loss": stop_loss,
+            "risk_reward_ratio": risk_reward_ratio,
+            "take_profit": take_profit
         })
         
         df = data_context.df
         df_backtest = df.copy()
-        threshold = self.params.get('backtesting', 'enter_threshold', default=threshold)
-        hedge_threshold = self.params.get('backtesting', 'hedge_threshold', default=hedge_threshold)
+        threshold = self.params.get('strategy', 'enter_threshold', default=threshold)
+        hedge_threshold = self.params.get('strategy', 'hedge_threshold', default=hedge_threshold)
+        threshold_bias = self.params.get('strategy', 'threshold_bias', default=1)
         # Different thresholds for long and short
-        long_threshold = threshold
-        short_threshold = threshold#*1.1382 # More conservative
+        long_threshold = threshold * threshold_bias # More conservative
+        short_threshold = threshold / threshold_bias # More aggressive
+        long_exit_threshold = self.exit_threshold * threshold_bias # More conservative
+        short_exit_threshold = self.exit_threshold / threshold_bias # More aggressive
         
         # Initialize columns for tracking positions and returns
         df_backtest['short_prob'] = probabilities[:, 0]  # Probability of short position
@@ -290,7 +303,9 @@ class BacktestEngine:
         df_backtest['fee_impact'] = 0.0  # Fee amount for each trade
         df_backtest['total_fees_paid'] = 0.0  # Running total of fees paid
         df_backtest['closed_position_type'] = np.nan  # Type of closed position: long, short, hedged
-        
+        # Initialize exit_reason with object dtype to handle string values
+        df_backtest['exit_reason'] = pd.Series(np.nan, index=df_backtest.index, dtype='object')  # Reason for position exit: signal, stop_loss, etc.
+
         # Add column to track if position matches target (only if target exists in df)
         if 'target' in df.columns:
             df_backtest['target_match'] = False
@@ -301,10 +316,15 @@ class BacktestEngine:
         entry_price = 0  # Price at entry
         total_fees_paid = 0.0  # Track total fees paid
         trade_count = 0  # Count of executed trades
+        stop_loss_exits = 0  # Count of stop loss exits
+        take_profit_exits = 0  # Count of take profit exits
         
         data_context.add_processing_step("backtest_columns_initialized", {
             "position_states": "[-1=short, 0=flat, 1=long, 2=hedged]",
-            "data_rows": len(df_backtest)
+            "data_rows": len(df_backtest),
+            "stop_loss_enabled": (stop_loss > 0),
+            "take_profit_enabled": (take_profit > 0),
+            "risk_reward_ratio": risk_reward_ratio
         })
         
         for i in range(1, len(df_backtest) - 1):
@@ -314,6 +334,123 @@ class BacktestEngine:
             short_prob = probabilities[i, 0]  # Probability of profitable short opportunity
             no_trade_prob = probabilities[i, 1]  # Probability of no profitable opportunity
             long_prob = probabilities[i, 2]  # Probability of profitable long opportunity
+            
+            # Check if stop loss is triggered before other logic
+            stop_loss_triggered = False
+            take_profit_triggered = False
+            
+            if position == 1:  # Check stop loss and take profit for long position
+                # Calculate current percentage loss
+                current_return = (current_price / entry_price) - 1
+                
+                if stop_loss and current_return < -stop_loss:
+                    # Stop loss triggered for long position
+                    df_backtest.loc[df_backtest.index[i], 'closed_position_type'] = position
+                    df_backtest.loc[df_backtest.index[i], 'exit_price'] = current_price
+                    df_backtest.loc[df_backtest.index[i], 'position'] = 0
+                    df_backtest.loc[df_backtest.index[i], 'exit_reason'] = "stop_loss"
+                    
+                    # Calculate return (accounting for fees)
+                    trade_return = (current_price / entry_price) - 1 - (fee_rate * 2)
+                    df_backtest.loc[df_backtest.index[i], 'trade_return'] = trade_return
+                    df_backtest.loc[df_backtest.index[i], 'trade_duration'] = i - entry_idx
+                    
+                    # Calculate exit fee
+                    exit_fee = fee_rate
+                    total_fees_paid += exit_fee
+                    
+                    # Record fee impact
+                    df_backtest.loc[df_backtest.index[i], 'fee_impact'] = exit_fee
+                    df_backtest.loc[df_backtest.index[i], 'total_fees_paid'] = total_fees_paid
+                    
+                    position = 0
+                    stop_loss_triggered = True
+                    stop_loss_exits += 1
+                
+                elif take_profit and current_return > take_profit:  # R:R based take profit check
+                    # Take profit triggered for long position
+                    df_backtest.loc[df_backtest.index[i], 'closed_position_type'] = position
+                    df_backtest.loc[df_backtest.index[i], 'exit_price'] = current_price
+                    df_backtest.loc[df_backtest.index[i], 'position'] = 0
+                    df_backtest.loc[df_backtest.index[i], 'exit_reason'] = "take_profit"
+                    
+                    # Calculate return (accounting for fees)
+                    trade_return = (current_price / entry_price) - 1 - (fee_rate * 2)
+                    df_backtest.loc[df_backtest.index[i], 'trade_return'] = trade_return
+                    df_backtest.loc[df_backtest.index[i], 'trade_duration'] = i - entry_idx
+                    
+                    # Calculate exit fee
+                    exit_fee = fee_rate
+                    total_fees_paid += exit_fee
+                    
+                    # Record fee impact
+                    df_backtest.loc[df_backtest.index[i], 'fee_impact'] = exit_fee
+                    df_backtest.loc[df_backtest.index[i], 'total_fees_paid'] = total_fees_paid
+                    
+                    position = 0
+                    take_profit_triggered = True
+                    take_profit_exits += 1
+                    
+            elif position == -1:  # Check stop loss for short position
+                # Calculate current percentage loss for short (reverse logic)
+                current_return = 1 - (current_price / entry_price)
+                
+                if stop_loss and current_return < -stop_loss:
+                    # Stop loss triggered for short position
+                    df_backtest.loc[df_backtest.index[i], 'closed_position_type'] = position
+                    df_backtest.loc[df_backtest.index[i], 'exit_price'] = current_price
+                    df_backtest.loc[df_backtest.index[i], 'position'] = 0
+                    df_backtest.loc[df_backtest.index[i], 'exit_reason'] = "stop_loss"
+                    
+                    # Calculate return (accounting for fees)
+                    trade_return = 1 - (current_price / entry_price) - (fee_rate * 2)
+                    df_backtest.loc[df_backtest.index[i], 'trade_return'] = trade_return
+                    df_backtest.loc[df_backtest.index[i], 'trade_duration'] = i - entry_idx
+                    
+                    # Calculate exit fee
+                    exit_fee = fee_rate
+                    total_fees_paid += exit_fee
+                    
+                    # Record fee impact
+                    df_backtest.loc[df_backtest.index[i], 'fee_impact'] = exit_fee
+                    df_backtest.loc[df_backtest.index[i], 'total_fees_paid'] = total_fees_paid
+                    
+                    position = 0
+                    stop_loss_triggered = True
+                    stop_loss_exits += 1
+                
+                elif take_profit and current_return > take_profit:  # R:R based take profit check
+                    # Take profit triggered for short position
+                    df_backtest.loc[df_backtest.index[i], 'closed_position_type'] = position
+                    df_backtest.loc[df_backtest.index[i], 'exit_price'] = current_price
+                    df_backtest.loc[df_backtest.index[i], 'position'] = 0
+                    df_backtest.loc[df_backtest.index[i], 'exit_reason'] = "take_profit"
+                    
+                    # Calculate return (accounting for fees)
+                    trade_return = 1 - (current_price / entry_price) - (fee_rate * 2)
+                    df_backtest.loc[df_backtest.index[i], 'trade_return'] = trade_return
+                    df_backtest.loc[df_backtest.index[i], 'trade_duration'] = i - entry_idx
+                    
+                    # Calculate exit fee
+                    exit_fee = fee_rate
+                    total_fees_paid += exit_fee
+                    
+                    # Record fee impact
+                    df_backtest.loc[df_backtest.index[i], 'fee_impact'] = exit_fee
+                    df_backtest.loc[df_backtest.index[i], 'total_fees_paid'] = total_fees_paid
+                    
+                    position = 0
+                    take_profit_triggered = True
+                    take_profit_exits += 1
+            
+            # If stop loss was triggered, skip the rest of the logic for this iteration
+            if stop_loss_triggered or take_profit_triggered:
+                continue
+            
+            # # If a position was closed by stop loss in the previous bar, skip this bar too
+            # if i > 1 and df_backtest.loc[df_backtest.index[i-1], 'exit_reason'] == "stop_loss":
+            #     df_backtest.loc[df_backtest.index[i], 'position'] = 0  # Stay flat for this bar
+            #     continue
             
             # Update position based on current state and probabilities
             if position == 0:  # Currently flat
@@ -367,12 +504,13 @@ class BacktestEngine:
                 
             elif position == 1:  # Currently long
                 # Check for exit or hedge signals
-                if long_prob < self.exit_threshold or short_prob > short_threshold:
+                if long_prob < long_exit_threshold or short_prob > short_threshold:
                     # Exit long position if long probability drops or short probability rises
                     df_backtest.loc[df_backtest.index[i], 'closed_position_type'] = position
                     df_backtest.loc[df_backtest.index[i], 'exit_price'] = current_price
                     df_backtest.loc[df_backtest.index[i], 'position'] = 0
-                    
+                    df_backtest.loc[df_backtest.index[i], 'exit_reason'] = "signal"
+
                     # Calculate return (accounting for fees)
                     # Return = (exit price / entry price) - 1 - round-trip fees
                     trade_return = (current_price / entry_price) - 1 - (fee_rate * 2)
@@ -423,12 +561,13 @@ class BacktestEngine:
             
             elif position == -1:  # Currently short
                 # Check for exit or hedge signals
-                if short_prob < self.exit_threshold or long_prob > long_threshold:
+                if short_prob < short_exit_threshold or long_prob > long_threshold:
                     # Exit short position if short probability drops or long probability rises
                     df_backtest.loc[df_backtest.index[i], 'closed_position_type'] = position
                     df_backtest.loc[df_backtest.index[i], 'exit_price'] = current_price
                     df_backtest.loc[df_backtest.index[i], 'position'] = 0
-                    
+                    df_backtest.loc[df_backtest.index[i], 'exit_reason'] = "signal"
+
                     # Calculate return (accounting for fees)
                     # Short return = 1 - (exit price / entry price) - round-trip fees
                     trade_return = 1 - (current_price / entry_price) - (fee_rate * 2)
@@ -484,7 +623,8 @@ class BacktestEngine:
                     df_backtest.loc[df_backtest.index[i], 'closed_position_type'] = position
                     df_backtest.loc[df_backtest.index[i], 'exit_price'] = current_price
                     df_backtest.loc[df_backtest.index[i], 'position'] = 0
-                    
+                    df_backtest.loc[df_backtest.index[i], 'exit_reason'] = "signal"
+                                    
                     # Hedged positions typically have near-zero returns plus double fees
                     # We approximate this as the cost of the double hedging fees
                     trade_return = -(fee_rate * 4)  # Approximate cost of hedging
@@ -553,7 +693,8 @@ class BacktestEngine:
             current_price = df_backtest['close'].iloc[i]
             df_backtest.loc[df_backtest.index[i], 'closed_position_type'] = position
             df_backtest.loc[df_backtest.index[i], 'exit_price'] = current_price
-            
+            df_backtest.loc[df_backtest.index[i], 'exit_reason'] = "end_of_data"
+        
             if position == 1:  # Long position
                 trade_return = (current_price / entry_price) - 1 - (fee_rate * 2)
             elif position == -1:  # Short position
@@ -577,7 +718,9 @@ class BacktestEngine:
             "initial_position": 0,
             "final_position": position,
             "total_trades_entered": trade_count,
-            "total_fees_paid": total_fees_paid
+            "total_fees_paid": total_fees_paid,
+            "stop_loss_exits": stop_loss_exits,
+            "take_profit_exits": take_profit_exits
         })
         
         # Initialize strategy returns
@@ -647,6 +790,14 @@ class BacktestEngine:
                     "overall_accuracy": target_accuracy,
                     "class_accuracies": class_accuracy
                 })
+    
+        # Analyze stop loss metrics
+        if stop_loss_exits > 0:
+            stop_loss_trades = trades[trades['exit_reason'] == 'stop_loss']
+            avg_stop_loss_return = stop_loss_trades['trade_return'].mean() if len(stop_loss_trades) > 0 else 0
+            self.logger.info(f"Stop loss was triggered {stop_loss_exits} times with average return: {avg_stop_loss_return:.2%}")
+        else:
+            self.logger.info("No stop loss exits occurred in this backtest")
                 
         metrics = {
             'total_trades': trade_count,
@@ -667,8 +818,43 @@ class BacktestEngine:
             'total_fee_drag': overall_fee_drag,
             'final_return': df_backtest['strategy_cumulative'].iloc[-1],
             'target_match_accuracy': target_accuracy,
-            'target_class_accuracy': class_accuracy
+            'target_class_accuracy': class_accuracy,
+            'stop_loss': stop_loss,
+            'stop_loss_exits': stop_loss_exits,
+            'stop_loss_exit_rate': stop_loss_exits / trade_count if trade_count > 0 else 0,
+            'take_profit': take_profit,
+            'take_profit_exits': take_profit_exits,
+            'take_profit_exit_rate': take_profit_exits / trade_count if trade_count > 0 else 0,
+            'risk_reward_ratio': risk_reward_ratio
         }
+        
+        # Add detailed stop loss metrics
+        if stop_loss_exits > 0:
+            stop_loss_trades = trades[trades['exit_reason'] == 'stop_loss']
+            signal_trades = trades[trades['exit_reason'] == 'signal']
+            
+            metrics['stop_loss_avg_return'] = stop_loss_trades['trade_return'].mean() if len(stop_loss_trades) > 0 else 0
+            metrics['signal_exit_avg_return'] = signal_trades['trade_return'].mean() if len(signal_trades) > 0 else 0
+            
+            # Compute max drawdown and drawdown statistics for trades that hit stop loss
+            if len(stop_loss_trades) > 0:
+                metrics['stop_loss_max_loss'] = stop_loss_trades['trade_return'].min()
+                metrics['stop_loss_long_exits'] = len(stop_loss_trades[stop_loss_trades['closed_position_type'] == 1])
+                metrics['stop_loss_short_exits'] = len(stop_loss_trades[stop_loss_trades['closed_position_type'] == -1])
+        
+    
+        # Add detailed take profit metrics
+        if take_profit_exits > 0:
+            take_profit_trades = trades[trades['exit_reason'] == 'take_profit']
+            
+            metrics['take_profit_avg_return'] = take_profit_trades['trade_return'].mean() if len(take_profit_trades) > 0 else 0
+            
+            # Detailed stats for take profit exits
+            metrics['take_profit_long_exits'] = len(take_profit_trades[take_profit_trades['closed_position_type'] == 1])
+            metrics['take_profit_short_exits'] = len(take_profit_trades[take_profit_trades['closed_position_type'] == -1])
+        
+        # Log the take profit info
+        self.logger.info(f"Take profit was triggered {take_profit_exits} times (R:R = {risk_reward_ratio})")
         
         # Log the accuracy
         self.logger.info(f"Position to target match accuracy: {target_accuracy:.2%}")
@@ -681,7 +867,12 @@ class BacktestEngine:
             "total_trades": metrics['total_trades'],
             "win_rate": metrics['win_rate'],
             "final_return": metrics['final_return'],
-            "profit_factor": metrics['profit_factor']
+            "profit_factor": metrics['profit_factor'],
+            "stop_loss_exits": stop_loss_exits,
+            "stop_loss_pct": stop_loss,
+            "take_profit_exits": take_profit_exits,
+            "take_profit_pct": take_profit,
+            "risk_reward_ratio": risk_reward_ratio
         })
         
         return df_backtest, metrics
@@ -792,7 +983,7 @@ class BacktestEngine:
         successful_tests = sum(len(exchange_results[symbol]) 
                             for exchange in all_results 
                             for symbol in all_results[exchange])
-    
+
         total_tests = len(exchanges) * len(symbols) * len(timeframes)
         success_rate = successful_tests / total_tests if total_tests > 0 else 0
         
